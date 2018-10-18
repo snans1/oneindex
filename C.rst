@@ -5022,3 +5022,6038 @@ Python类对每个比较操作都需要实现一个特殊方法来支持。
     Calling spam
     1 2 3
     >>>
+
+----------
+讨论
+----------
+通过装饰器来给被包装函数增加参数的做法并不常见。
+尽管如此，有时候它可以避免一些重复代码。例如，如果你有下面这样的代码：
+
+.. code-block:: python
+
+    def a(x, debug=False):
+        if debug:
+            print('Calling a')
+
+    def b(x, y, z, debug=False):
+        if debug:
+            print('Calling b')
+
+    def c(x, y, debug=False):
+        if debug:
+            print('Calling c')
+
+那么你可以将其重构成这样：
+
+.. code-block:: python
+
+    from functools import wraps
+    import inspect
+
+    def optional_debug(func):
+        if 'debug' in inspect.getargspec(func).args:
+            raise TypeError('debug argument already defined')
+
+        @wraps(func)
+        def wrapper(*args, debug=False, **kwargs):
+            if debug:
+                print('Calling', func.__name__)
+            return func(*args, **kwargs)
+        return wrapper
+
+    @optional_debug
+    def a(x):
+        pass
+
+    @optional_debug
+    def b(x, y, z):
+        pass
+
+    @optional_debug
+    def c(x, y):
+        pass
+
+这种实现方案之所以行得通，在于强制关键字参数很容易被添加到接受 ``*args`` 和 ``**kwargs`` 参数的函数中。
+通过使用强制关键字参数，它被作为一个特殊情况被挑选出来，
+并且接下来仅仅使用剩余的位置和关键字参数去调用这个函数时，这个特殊参数会被排除在外。
+也就是说，它并不会被纳入到 ``**kwargs`` 中去。
+
+还有一个难点就是如何去处理被添加的参数与被包装函数参数直接的名字冲突。
+例如，如果装饰器 ``@optional_debug`` 作用在一个已经拥有一个 ``debug`` 参数的函数上时会有问题。
+这里我们增加了一步名字检查。
+
+上面的方案还可以更完美一点，因为精明的程序员应该发现了被包装函数的函数签名其实是错误的。例如：
+
+.. code-block:: python
+
+    >>> @optional_debug
+    ... def add(x,y):
+    ...     return x+y
+    ...
+    >>> import inspect
+    >>> print(inspect.signature(add))
+    (x, y)
+    >>>
+
+通过如下的修改，可以解决这个问题：
+
+.. code-block:: python
+
+    from functools import wraps
+    import inspect
+
+    def optional_debug(func):
+        if 'debug' in inspect.getargspec(func).args:
+            raise TypeError('debug argument already defined')
+
+        @wraps(func)
+        def wrapper(*args, debug=False, **kwargs):
+            if debug:
+                print('Calling', func.__name__)
+            return func(*args, **kwargs)
+
+        sig = inspect.signature(func)
+        parms = list(sig.parameters.values())
+        parms.append(inspect.Parameter('debug',
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=False))
+        wrapper.__signature__ = sig.replace(parameters=parms)
+        return wrapper
+
+
+通过这样的修改，包装后的函数签名就能正确的显示 ``debug`` 参数的存在了。例如：
+
+.. code-block:: python
+
+    >>> @optional_debug
+    ... def add(x,y):
+    ...     return x+y
+    ...
+    >>> print(inspect.signature(add))
+    (x, y, *, debug=False)
+    >>> add(2,3)
+    5
+    >>>
+
+参考9.16小节获取更多关于函数签名的信息。
+============================
+9.12 使用装饰器扩充类的功能
+============================
+
+----------
+问题
+----------
+你想通过反省或者重写类定义的某部分来修改它的行为，但是你又不希望使用继承或元类的方式。
+
+----------
+解决方案
+----------
+这种情况可能是类装饰器最好的使用场景了。例如，下面是一个重写了特殊方法 ``__getattribute__`` 的类装饰器，
+可以打印日志：
+
+.. code-block:: python
+
+    def log_getattribute(cls):
+        # Get the original implementation
+        orig_getattribute = cls.__getattribute__
+
+        # Make a new definition
+        def new_getattribute(self, name):
+            print('getting:', name)
+            return orig_getattribute(self, name)
+
+        # Attach to the class and return
+        cls.__getattribute__ = new_getattribute
+        return cls
+
+    # Example use
+    @log_getattribute
+    class A:
+        def __init__(self,x):
+            self.x = x
+        def spam(self):
+            pass
+
+下面是使用效果：
+
+.. code-block:: python
+
+    >>> a = A(42)
+    >>> a.x
+    getting: x
+    42
+    >>> a.spam()
+    getting: spam
+    >>>
+
+----------
+讨论
+----------
+类装饰器通常可以作为其他高级技术比如混入或元类的一种非常简洁的替代方案。
+比如，上面示例中的另外一种实现使用到继承：
+
+.. code-block:: python
+
+    class LoggedGetattribute:
+        def __getattribute__(self, name):
+            print('getting:', name)
+            return super().__getattribute__(name)
+
+    # Example:
+    class A(LoggedGetattribute):
+        def __init__(self,x):
+            self.x = x
+        def spam(self):
+            pass
+
+这种方案也行得通，但是为了去理解它，你就必须知道方法调用顺序、``super()`` 以及其它8.7小节介绍的继承知识。
+某种程度上来讲，类装饰器方案就显得更加直观，并且它不会引入新的继承体系。它的运行速度也更快一些，
+因为他并不依赖 ``super()`` 函数。
+
+如果你系想在一个类上面使用多个类装饰器，那么就需要注意下顺序问题。
+例如，一个装饰器A会将其装饰的方法完整替换成另一种实现，
+而另一个装饰器B只是简单的在其装饰的方法中添加点额外逻辑。
+那么这时候装饰器A就需要放在装饰器B的前面。
+
+你还可以回顾一下8.13小节另外一个关于类装饰器的有用的例子。
+============================
+9.13 使用元类控制实例的创建
+============================
+
+----------
+问题
+----------
+你想通过改变实例创建方式来实现单例、缓存或其他类似的特性。
+
+----------
+解决方案
+----------
+Python程序员都知道，如果你定义了一个类，就能像函数一样的调用它来创建实例，例如：
+
+.. code-block:: python
+
+    class Spam:
+        def __init__(self, name):
+            self.name = name
+
+    a = Spam('Guido')
+    b = Spam('Diana')
+
+如果你想自定义这个步骤，你可以定义一个元类并自己实现 ``__call__()`` 方法。
+
+为了演示，假设你不想任何人创建这个类的实例：
+
+.. code-block:: python
+
+    class NoInstances(type):
+        def __call__(self, *args, **kwargs):
+            raise TypeError("Can't instantiate directly")
+
+    # Example
+    class Spam(metaclass=NoInstances):
+        @staticmethod
+        def grok(x):
+            print('Spam.grok')
+
+这样的话，用户只能调用这个类的静态方法，而不能使用通常的方法来创建它的实例。例如：
+
+.. code-block:: python
+
+    >>> Spam.grok(42)
+    Spam.grok
+    >>> s = Spam()
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+        File "example1.py", line 7, in __call__
+            raise TypeError("Can't instantiate directly")
+    TypeError: Can't instantiate directly
+    >>>
+
+现在，假如你想实现单例模式（只能创建唯一实例的类），实现起来也很简单：
+
+.. code-block:: python
+
+    class Singleton(type):
+        def __init__(self, *args, **kwargs):
+            self.__instance = None
+            super().__init__(*args, **kwargs)
+
+        def __call__(self, *args, **kwargs):
+            if self.__instance is None:
+                self.__instance = super().__call__(*args, **kwargs)
+                return self.__instance
+            else:
+                return self.__instance
+
+    # Example
+    class Spam(metaclass=Singleton):
+        def __init__(self):
+            print('Creating Spam')
+
+那么Spam类就只能创建唯一的实例了，演示如下：
+
+.. code-block:: python
+
+    >>> a = Spam()
+    Creating Spam
+    >>> b = Spam()
+    >>> a is b
+    True
+    >>> c = Spam()
+    >>> a is c
+    True
+    >>>
+
+最后，假设你想创建8.25小节中那样的缓存实例。下面我们可以通过元类来实现：
+
+.. code-block:: python
+
+    import weakref
+
+    class Cached(type):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.__cache = weakref.WeakValueDictionary()
+
+        def __call__(self, *args):
+            if args in self.__cache:
+                return self.__cache[args]
+            else:
+                obj = super().__call__(*args)
+                self.__cache[args] = obj
+                return obj
+
+    # Example
+    class Spam(metaclass=Cached):
+        def __init__(self, name):
+            print('Creating Spam({!r})'.format(name))
+            self.name = name
+
+然后我也来测试一下：
+
+.. code-block:: python
+
+    >>> a = Spam('Guido')
+    Creating Spam('Guido')
+    >>> b = Spam('Diana')
+    Creating Spam('Diana')
+    >>> c = Spam('Guido') # Cached
+    >>> a is b
+    False
+    >>> a is c # Cached value returned
+    True
+    >>>
+
+----------
+讨论
+----------
+利用元类实现多种实例创建模式通常要比不使用元类的方式优雅得多。
+
+假设你不使用元类，你可能需要将类隐藏在某些工厂函数后面。
+比如为了实现一个单例，你你可能会像下面这样写：
+
+.. code-block:: python
+
+    class _Spam:
+        def __init__(self):
+            print('Creating Spam')
+
+    _spam_instance = None
+
+    def Spam():
+        global _spam_instance
+
+        if _spam_instance is not None:
+            return _spam_instance
+        else:
+            _spam_instance = _Spam()
+            return _spam_instance
+
+尽管使用元类可能会涉及到比较高级点的技术，但是它的代码看起来会更加简洁舒服，而且也更加直观。
+
+更多关于创建缓存实例、弱引用等内容，请参考8.25小节。
+============================
+9.14 捕获类的属性定义顺序
+============================
+
+----------
+问题
+----------
+你想自动记录一个类中属性和方法定义的顺序，
+然后可以利用它来做很多操作（比如序列化、映射到数据库等等）。
+
+----------
+解决方案
+----------
+利用元类可以很容易的捕获类的定义信息。下面是一个例子，使用了一个OrderedDict来记录描述器的定义顺序：
+
+.. code-block:: python
+
+    from collections import OrderedDict
+
+    # A set of descriptors for various types
+    class Typed:
+        _expected_type = type(None)
+        def __init__(self, name=None):
+            self._name = name
+
+        def __set__(self, instance, value):
+            if not isinstance(value, self._expected_type):
+                raise TypeError('Expected ' + str(self._expected_type))
+            instance.__dict__[self._name] = value
+
+    class Integer(Typed):
+        _expected_type = int
+
+    class Float(Typed):
+        _expected_type = float
+
+    class String(Typed):
+        _expected_type = str
+
+    # Metaclass that uses an OrderedDict for class body
+    class OrderedMeta(type):
+        def __new__(cls, clsname, bases, clsdict):
+            d = dict(clsdict)
+            order = []
+            for name, value in clsdict.items():
+                if isinstance(value, Typed):
+                    value._name = name
+                    order.append(name)
+            d['_order'] = order
+            return type.__new__(cls, clsname, bases, d)
+
+        @classmethod
+        def __prepare__(cls, clsname, bases):
+            return OrderedDict()
+
+在这个元类中，执行类主体时描述器的定义顺序会被一个 ``OrderedDict``捕获到，
+生成的有序名称从字典中提取出来并放入类属性 ``_order`` 中。这样的话类中的方法可以通过多种方式来使用它。
+例如，下面是一个简单的类，使用这个排序字典来实现将一个类实例的数据序列化为一行CSV数据：
+
+.. code-block:: python
+
+    class Structure(metaclass=OrderedMeta):
+        def as_csv(self):
+            return ','.join(str(getattr(self,name)) for name in self._order)
+
+    # Example use
+    class Stock(Structure):
+        name = String()
+        shares = Integer()
+        price = Float()
+
+        def __init__(self, name, shares, price):
+            self.name = name
+            self.shares = shares
+            self.price = price
+
+我们在交互式环境中测试一下这个Stock类：
+
+.. code-block:: python
+
+    >>> s = Stock('GOOG',100,490.1)
+    >>> s.name
+    'GOOG'
+    >>> s.as_csv()
+    'GOOG,100,490.1'
+    >>> t = Stock('AAPL','a lot', 610.23)
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+        File "dupmethod.py", line 34, in __init__
+    TypeError: shares expects <class 'int'>
+    >>>
+
+----------
+讨论
+----------
+本节一个关键点就是OrderedMeta元类中定义的 `` __prepare__()`` 方法。
+这个方法会在开始定义类和它的父类的时候被执行。它必须返回一个映射对象以便在类定义体中被使用到。
+我们这里通过返回了一个OrderedDict而不是一个普通的字典，可以很容易的捕获定义的顺序。
+
+如果你想构造自己的类字典对象，可以很容易的扩展这个功能。比如，下面的这个修改方案可以防止重复的定义：
+
+.. code-block:: python
+
+    from collections import OrderedDict
+
+    class NoDupOrderedDict(OrderedDict):
+        def __init__(self, clsname):
+            self.clsname = clsname
+            super().__init__()
+        def __setitem__(self, name, value):
+            if name in self:
+                raise TypeError('{} already defined in {}'.format(name, self.clsname))
+            super().__setitem__(name, value)
+
+    class OrderedMeta(type):
+        def __new__(cls, clsname, bases, clsdict):
+            d = dict(clsdict)
+            d['_order'] = [name for name in clsdict if name[0] != '_']
+            return type.__new__(cls, clsname, bases, d)
+
+        @classmethod
+        def __prepare__(cls, clsname, bases):
+            return NoDupOrderedDict(clsname)
+
+下面我们测试重复的定义会出现什么情况：
+
+.. code-block:: python
+
+    >>> class A(metaclass=OrderedMeta):
+    ... def spam(self):
+    ... pass
+    ... def spam(self):
+    ... pass
+    ...
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+        File "<stdin>", line 4, in A
+        File "dupmethod2.py", line 25, in __setitem__
+            (name, self.clsname))
+    TypeError: spam already defined in A
+    >>>
+
+最后还有一点很重要，就是在 ``__new__()`` 方法中对于元类中被修改字典的处理。
+尽管类使用了另外一个字典来定义，在构造最终的 ``class`` 对象的时候，
+我们仍然需要将这个字典转换为一个正确的 ``dict`` 实例。
+通过语句 ``d = dict(clsdict)`` 来完成这个效果。
+
+对于很多应用程序而已，能够捕获类定义的顺序是一个看似不起眼却又非常重要的特性。
+例如，在对象关系映射中，我们通常会看到下面这种方式定义的类：
+
+.. code-block:: python
+
+    class Stock(Model):
+        name = String()
+        shares = Integer()
+        price = Float()
+
+在框架底层，我们必须捕获定义的顺序来将对象映射到元组或数据库表中的行（就类似于上面例子中的 ``as_csv()`` 的功能）。
+这节演示的技术非常简单，并且通常会比其他类似方法（通常都要在描述器类中维护一个隐藏的计数器）要简单的多。
+
+============================
+9.15 定义有可选参数的元类
+============================
+
+----------
+问题
+----------
+你想定义一个元类，允许类定义时提供可选参数，这样可以控制或配置类型的创建过程。
+
+----------
+解决方案
+----------
+在定义类的时候，Python允许我们使用 ``metaclass``关键字参数来指定特定的元类。
+例如使用抽象基类：
+
+.. code-block:: python
+
+    from abc import ABCMeta, abstractmethod
+    class IStream(metaclass=ABCMeta):
+        @abstractmethod
+        def read(self, maxsize=None):
+            pass
+
+        @abstractmethod
+        def write(self, data):
+            pass
+
+然而，在自定义元类中我们还可以提供其他的关键字参数，如下所示：
+
+.. code-block:: python
+
+    class Spam(metaclass=MyMeta, debug=True, synchronize=True):
+        pass
+
+为了使元类支持这些关键字参数，你必须确保在 ``__prepare__()`` , ``__new__()`` 和 ``__init__()`` 方法中
+都使用强制关键字参数。就像下面这样：
+
+.. code-block:: python
+
+    class MyMeta(type):
+        # Optional
+        @classmethod
+        def __prepare__(cls, name, bases, *, debug=False, synchronize=False):
+            # Custom processing
+            pass
+            return super().__prepare__(name, bases)
+
+        # Required
+        def __new__(cls, name, bases, ns, *, debug=False, synchronize=False):
+            # Custom processing
+            pass
+            return super().__new__(cls, name, bases, ns)
+
+        # Required
+        def __init__(self, name, bases, ns, *, debug=False, synchronize=False):
+            # Custom processing
+            pass
+            super().__init__(name, bases, ns)
+
+----------
+讨论
+----------
+给一个元类添加可选关键字参数需要你完全弄懂类创建的所有步骤，
+因为这些参数会被传递给每一个相关的方法。
+``__prepare__()`` 方法在所有类定义开始执行前首先被调用，用来创建类命名空间。
+通常来讲，这个方法只是简单的返回一个字典或其他映射对象。
+``__new__()`` 方法被用来实例化最终的类对象。它在类的主体被执行完后开始执行。
+``__init__()`` 方法最后被调用，用来执行其他的一些初始化工作。
+
+当我们构造元类的时候，通常只需要定义一个 ``__new__()`` 或 ``__init__()`` 方法，但不是两个都定义。
+但是，如果需要接受其他的关键字参数的话，这两个方法就要同时提供，并且都要提供对应的参数签名。
+默认的 ``__prepare__()`` 方法接受任意的关键字参数，但是会忽略它们，
+所以只有当这些额外的参数可能会影响到类命名空间的创建时你才需要去定义 ``__prepare__()`` 方法。
+
+通过使用强制关键字参数，在类的创建过程中我们必须通过关键字来指定这些参数。
+
+使用关键字参数配置一个元类还可以视作对类变量的一种替代方式。例如：
+
+.. code-block:: python
+
+    class Spam(metaclass=MyMeta):
+        debug = True
+        synchronize = True
+        pass
+
+将这些属性定义为参数的好处在于它们不会污染类的名称空间，
+这些属性仅仅只从属于类的创建阶段，而不是类中的语句执行阶段。
+另外，它们在 ``__prepare__()`` 方法中是可以被访问的，因为这个方法会在所有类主体执行前被执行。
+但是类变量只能在元类的 ``__new__()`` 和 ``__init__()`` 方法中可见。
+
+===============================
+9.16 *args和**kwargs的强制参数签名
+===============================
+
+----------
+问题
+----------
+你有一个函数或方法，它使用*args和**kwargs作为参数，这样使得它比较通用，
+但有时候你想检查传递进来的参数是不是某个你想要的类型。
+
+----------
+解决方案
+----------
+对任何涉及到操作函数调用签名的问题，你都应该使用 ``inspect`` 模块中的签名特性。
+我们最主要关注两个类：``Signature`` 和 ``Parameter`` 。下面是一个创建函数前面的交互例子：
+
+.. code-block:: python
+
+    >>> from inspect import Signature, Parameter
+    >>> # Make a signature for a func(x, y=42, *, z=None)
+    >>> parms = [ Parameter('x', Parameter.POSITIONAL_OR_KEYWORD),
+    ...         Parameter('y', Parameter.POSITIONAL_OR_KEYWORD, default=42),
+    ...         Parameter('z', Parameter.KEYWORD_ONLY, default=None) ]
+    >>> sig = Signature(parms)
+    >>> print(sig)
+    (x, y=42, *, z=None)
+    >>>
+
+一旦你有了一个签名对象，你就可以使用它的 ``bind()`` 方法很容易的将它绑定到 ``*args`` 和 ``**kwargs`` 上去。
+下面是一个简单的演示：
+
+.. code-block:: python
+
+    >>> def func(*args, **kwargs):
+    ...     bound_values = sig.bind(*args, **kwargs)
+    ...     for name, value in bound_values.arguments.items():
+    ...         print(name,value)
+    ...
+    >>> # Try various examples
+    >>> func(1, 2, z=3)
+    x 1
+    y 2
+    z 3
+    >>> func(1)
+    x 1
+    >>> func(1, z=3)
+    x 1
+    z 3
+    >>> func(y=2, x=1)
+    x 1
+    y 2
+    >>> func(1, 2, 3, 4)
+    Traceback (most recent call last):
+    ...
+        File "/usr/local/lib/python3.3/inspect.py", line 1972, in _bind
+            raise TypeError('too many positional arguments')
+    TypeError: too many positional arguments
+    >>> func(y=2)
+    Traceback (most recent call last):
+    ...
+        File "/usr/local/lib/python3.3/inspect.py", line 1961, in _bind
+            raise TypeError(msg) from None
+    TypeError: 'x' parameter lacking default value
+    >>> func(1, y=2, x=3)
+    Traceback (most recent call last):
+    ...
+        File "/usr/local/lib/python3.3/inspect.py", line 1985, in _bind
+            '{arg!r}'.format(arg=param.name))
+    TypeError: multiple values for argument 'x'
+    >>>
+
+可以看出来，通过将签名和传递的参数绑定起来，可以强制函数调用遵循特定的规则，比如必填、默认、重复等等。
+
+下面是一个强制函数签名更具体的例子。在代码中，我们在基类中先定义了一个非常通用的 ``__init__()`` 方法，
+然后我们强制所有的子类必须提供一个特定的参数签名。
+
+.. code-block:: python
+
+    from inspect import Signature, Parameter
+
+    def make_sig(*names):
+        parms = [Parameter(name, Parameter.POSITIONAL_OR_KEYWORD)
+                for name in names]
+        return Signature(parms)
+
+    class Structure:
+        __signature__ = make_sig()
+        def __init__(self, *args, **kwargs):
+            bound_values = self.__signature__.bind(*args, **kwargs)
+            for name, value in bound_values.arguments.items():
+                setattr(self, name, value)
+
+    # Example use
+    class Stock(Structure):
+        __signature__ = make_sig('name', 'shares', 'price')
+
+    class Point(Structure):
+        __signature__ = make_sig('x', 'y')
+
+下面是使用这个 ``Stock`` 类的示例：
+
+.. code-block:: python
+
+    >>> import inspect
+    >>> print(inspect.signature(Stock))
+    (name, shares, price)
+    >>> s1 = Stock('ACME', 100, 490.1)
+    >>> s2 = Stock('ACME', 100)
+    Traceback (most recent call last):
+    ...
+    TypeError: 'price' parameter lacking default value
+    >>> s3 = Stock('ACME', 100, 490.1, shares=50)
+    Traceback (most recent call last):
+    ...
+    TypeError: multiple values for argument 'shares'
+    >>>
+
+----------
+讨论
+----------
+在我们需要构建通用函数库、编写装饰器或实现代理的时候，对于 ``*args`` 和 ``**kwargs`` 的使用是很普遍的。
+但是，这样的函数有一个缺点就是当你想要实现自己的参数检验时，代码就会笨拙混乱。在8.11小节里面有这样一个例子。
+这时候我们可以通过一个签名对象来简化它。
+
+在最后的一个方案实例中，我们还可以通过使用自定义元类来创建签名对象。下面演示怎样来实现：
+
+.. code-block:: python
+
+    from inspect import Signature, Parameter
+
+    def make_sig(*names):
+        parms = [Parameter(name, Parameter.POSITIONAL_OR_KEYWORD)
+                for name in names]
+        return Signature(parms)
+
+    class StructureMeta(type):
+        def __new__(cls, clsname, bases, clsdict):
+            clsdict['__signature__'] = make_sig(*clsdict.get('_fields',[]))
+            return super().__new__(cls, clsname, bases, clsdict)
+
+    class Structure(metaclass=StructureMeta):
+        _fields = []
+        def __init__(self, *args, **kwargs):
+            bound_values = self.__signature__.bind(*args, **kwargs)
+            for name, value in bound_values.arguments.items():
+                setattr(self, name, value)
+
+    # Example
+    class Stock(Structure):
+        _fields = ['name', 'shares', 'price']
+
+    class Point(Structure):
+        _fields = ['x', 'y']
+
+当我们自定义签名的时候，将签名存储在特定的属性 ``__signature__`` 中通常是很有用的。
+这样的话，在使用 ``inspect`` 模块执行内省的代码就能发现签名并将它作为调用约定。
+
+.. code-block:: python
+
+    >>> import inspect
+    >>> print(inspect.signature(Stock))
+    (name, shares, price)
+    >>> print(inspect.signature(Point))
+    (x, y)
+    >>>
+
+==============================
+9.17 在类上强制使用编程规约
+==============================
+
+----------
+问题
+----------
+你的程序包含一个很大的类继承体系，你希望强制执行某些编程规约（或者代码诊断）来帮助程序员保持清醒。
+
+----------
+解决方案
+----------
+如果你想监控类的定义，通常可以通过定义一个元类。一个基本元类通常是继承自 ``type`` 并重定义它的 ``__new__()`` 方法
+或者是 ``__init__()`` 方法。比如：
+
+.. code-block:: python
+
+    class MyMeta(type):
+        def __new__(self, clsname, bases, clsdict):
+            # clsname is name of class being defined
+            # bases is tuple of base classes
+            # clsdict is class dictionary
+            return super().__new__(cls, clsname, bases, clsdict)
+
+另一种是，定义 ``__init__()`` 方法：
+
+.. code-block:: python
+
+    class MyMeta(type):
+        def __init__(self, clsname, bases, clsdict):
+            super().__init__(clsname, bases, clsdict)
+            # clsname is name of class being defined
+            # bases is tuple of base classes
+            # clsdict is class dictionary
+
+为了使用这个元类，你通常要将它放到到一个顶级父类定义中，然后其他的类继承这个顶级父类。例如：
+
+.. code-block:: python
+
+    class Root(metaclass=MyMeta):
+        pass
+
+    class A(Root):
+        pass
+
+    class B(Root):
+        pass
+
+元类的一个关键特点是它允许你在定义的时候检查类的内容。在重新定义 ``__init__()`` 方法中，
+你可以很轻松的检查类字典、父类等等。并且，一旦某个元类被指定给了某个类，那么就会被继承到所有子类中去。
+因此，一个框架的构建者就能在大型的继承体系中通过给一个顶级父类指定一个元类去捕获所有下面子类的定义。
+
+作为一个具体的应用例子，下面定义了一个元类，它会拒绝任何有混合大小写名字作为方法的类定义（可能是想气死Java程序员^_^）：
+
+.. code-block:: python
+
+    class NoMixedCaseMeta(type):
+        def __new__(cls, clsname, bases, clsdict):
+            for name in clsdict:
+                if name.lower() != name:
+                    raise TypeError('Bad attribute name: ' + name)
+            return super().__new__(cls, clsname, bases, clsdict)
+
+    class Root(metaclass=NoMixedCaseMeta):
+        pass
+
+    class A(Root):
+        def foo_bar(self): # Ok
+            pass
+
+    class B(Root):
+        def fooBar(self): # TypeError
+            pass
+
+作为更高级和实用的例子，下面有一个元类，它用来检测重载方法，确保它的调用参数跟父类中原始方法有着相同的参数签名。
+
+.. code-block:: python
+
+    from inspect import signature
+    import logging
+
+    class MatchSignaturesMeta(type):
+
+        def __init__(self, clsname, bases, clsdict):
+            super().__init__(clsname, bases, clsdict)
+            sup = super(self, self)
+            for name, value in clsdict.items():
+                if name.startswith('_') or not callable(value):
+                    continue
+                # Get the previous definition (if any) and compare the signatures
+                prev_dfn = getattr(sup,name,None)
+                if prev_dfn:
+                    prev_sig = signature(prev_dfn)
+                    val_sig = signature(value)
+                    if prev_sig != val_sig:
+                        logging.warning('Signature mismatch in %s. %s != %s',
+                                        value.__qualname__, prev_sig, val_sig)
+
+    # Example
+    class Root(metaclass=MatchSignaturesMeta):
+        pass
+
+    class A(Root):
+        def foo(self, x, y):
+            pass
+
+        def spam(self, x, *, z):
+            pass
+
+    # Class with redefined methods, but slightly different signatures
+    class B(A):
+        def foo(self, a, b):
+            pass
+
+        def spam(self,x,z):
+            pass
+
+如果你运行这段代码，就会得到下面这样的输出结果：
+
+.. code-block:: python
+
+    WARNING:root:Signature mismatch in B.spam. (self, x, *, z) != (self, x, z)
+    WARNING:root:Signature mismatch in B.foo. (self, x, y) != (self, a, b)
+
+这种警告信息对于捕获一些微妙的程序bug是很有用的。例如，如果某个代码依赖于传递给方法的关键字参数，
+那么当子类改变参数名字的时候就会调用出错。
+
+----------
+讨论
+----------
+在大型面向对象的程序中，通常将类的定义放在元类中控制是很有用的。
+元类可以监控类的定义，警告编程人员某些没有注意到的可能出现的问题。
+
+有人可能会说，像这样的错误可以通过程序分析工具或IDE去做会更好些。诚然，这些工具是很有用。
+但是，如果你在构建一个框架或函数库供其他人使用，那么你没办法去控制使用者要使用什么工具。
+因此，对于这种类型的程序，如果可以在元类中做检测或许可以带来更好的用户体验。
+
+在元类中选择重新定义 ``__new__()`` 方法还是 ``__init__()`` 方法取决于你想怎样使用结果类。
+``__new__()`` 方法在类创建之前被调用，通常用于通过某种方式（比如通过改变类字典的内容）修改类的定义。
+而 ``__init__()`` 方法是在类被创建之后被调用，当你需要完整构建类对象的时候会很有用。
+在最后一个例子中，这是必要的，因为它使用了 ``super()`` 函数来搜索之前的定义。
+它只能在类的实例被创建之后，并且相应的方法解析顺序也已经被设置好了。
+
+最后一个例子还演示了Python的函数签名对象的使用。
+实际上，元类将每个可调用定义放在一个类中，搜索前一个定义（如果有的话），
+然后通过使用 ``inspect.signature()`` 来简单的比较它们的调用签名。
+
+最后一点，代码中有一行使用了 ``super(self, self)`` 并不是排版错误。
+当使用元类的时候，我们要时刻记住一点就是 ``self`` 实际上是一个类对象。
+因此，这条语句其实就是用来寻找位于继承体系中构建 ``self`` 父类的定义。
+==============================
+9.18 以编程方式定义类
+==============================
+
+----------
+问题
+----------
+你在写一段代码，最终需要创建一个新的类对象。你考虑将类的定义源代码以字符串的形式发布出去。
+并且使用函数比如 ``exec()`` 来执行它，但是你想寻找一个更加优雅的解决方案。
+
+----------
+解决方案
+----------
+你可以使用函数 ``types.new_class()`` 来初始化新的类对象。
+你需要做的只是提供类的名字、父类元组、关键字参数，以及一个用成员变量填充类字典的回调函数。例如：
+
+.. code-block:: python
+
+    # stock.py
+    # Example of making a class manually from parts
+
+    # Methods
+    def __init__(self, name, shares, price):
+        self.name = name
+        self.shares = shares
+        self.price = price
+    def cost(self):
+        return self.shares * self.price
+
+    cls_dict = {
+        '__init__' : __init__,
+        'cost' : cost,
+    }
+
+    # Make a class
+    import types
+
+    Stock = types.new_class('Stock', (), {}, lambda ns: ns.update(cls_dict))
+    Stock.__module__ = __name__
+
+这种方式会构建一个普通的类对象，并且按照你的期望工作：
+
+.. code-block:: python
+
+    >>> s = Stock('ACME', 50, 91.1)
+    >>> s
+    <stock.Stock object at 0x1006a9b10>
+    >>> s.cost()
+    4555.0
+    >>>
+
+这种方法中，一个比较难理解的地方是在调用完 ``types.new_class()`` 对 ``Stock.__module__`` 的赋值。
+每次当一个类被定义后，它的 ``__module__`` 属性包含定义它的模块名。
+这个名字用于生成 ``__repr__()`` 方法的输出。它同样也被用于很多库，比如 ``pickle`` 。
+因此，为了让你创建的类是“正确”的，你需要确保这个属性也设置正确了。
+
+如果你想创建的类需要一个不同的元类，可以通过 ``types.new_class()`` 第三个参数传递给它。例如：
+
+.. code-block:: python
+
+    >>> import abc
+    >>> Stock = types.new_class('Stock', (), {'metaclass': abc.ABCMeta},
+    ...                         lambda ns: ns.update(cls_dict))
+    ...
+    >>> Stock.__module__ = __name__
+    >>> Stock
+    <class '__main__.Stock'>
+    >>> type(Stock)
+    <class 'abc.ABCMeta'>
+    >>>
+
+第三个参数还可以包含其他的关键字参数。比如，一个类的定义如下：
+
+.. code-block:: python
+
+    class Spam(Base, debug=True, typecheck=False):
+        pass
+
+那么可以将其翻译成如下的 ``new_class()`` 调用形式：
+
+.. code-block:: python
+
+    Spam = types.new_class('Spam', (Base,),
+                            {'debug': True, 'typecheck': False},
+                            lambda ns: ns.update(cls_dict))
+
+``new_class()`` 第四个参数最神秘，它是一个用来接受类命名空间的映射对象的函数。
+通常这是一个普通的字典，但是它实际上是 ``__prepare__()`` 方法返回的任意对象，这个在9.14小节已经介绍过了。
+这个函数需要使用上面演示的 ``update()`` 方法给命名空间增加内容。
+
+----------
+讨论
+----------
+很多时候如果能构造新的类对象是很有用的。
+有个很熟悉的例子是调用 ``collections.namedtuple()`` 函数，例如：
+
+
+.. code-block:: python
+
+    >>> Stock = collections.namedtuple('Stock', ['name', 'shares', 'price'])
+    >>> Stock
+    <class '__main__.Stock'>
+    >>>
+
+``namedtuple()`` 使用 ``exec()`` 而不是上面介绍的技术。但是，下面通过一个简单的变化，
+我们直接创建一个类：
+
+.. code-block:: python
+
+    import operator
+    import types
+    import sys
+
+    def named_tuple(classname, fieldnames):
+        # Populate a dictionary of field property accessors
+        cls_dict = { name: property(operator.itemgetter(n))
+                    for n, name in enumerate(fieldnames) }
+
+        # Make a __new__ function and add to the class dict
+        def __new__(cls, *args):
+            if len(args) != len(fieldnames):
+                raise TypeError('Expected {} arguments'.format(len(fieldnames)))
+            return tuple.__new__(cls, args)
+
+        cls_dict['__new__'] = __new__
+
+        # Make the class
+        cls = types.new_class(classname, (tuple,), {},
+                            lambda ns: ns.update(cls_dict))
+
+        # Set the module to that of the caller
+        cls.__module__ = sys._getframe(1).f_globals['__name__']
+        return cls
+
+这段代码的最后部分使用了一个所谓的"框架魔法"，通过调用 ``sys._getframe()`` 来获取调用者的模块名。
+另外一个框架魔法例子在2.15小节中有介绍过。
+
+下面的例子演示了前面的代码是如何工作的：
+
+.. code-block:: python
+
+    >>> Point = named_tuple('Point', ['x', 'y'])
+    >>> Point
+    <class '__main__.Point'>
+    >>> p = Point(4, 5)
+    >>> len(p)
+    2
+    >>> p.x
+    4
+    >>> p.y
+    5
+    >>> p.x = 2
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    AttributeError: can't set attribute
+    >>> print('%s %s' % p)
+    4 5
+    >>>
+
+这项技术一个很重要的方面是它对于元类的正确使用。
+你可能像通过直接实例化一个元类来直接创建一个类：
+
+.. code-block:: python
+
+    Stock = type('Stock', (), cls_dict)
+
+这种方法的问题在于它忽略了一些关键步骤，比如对于元类中 ``__prepare__()`` 方法的调用。
+通过使用 ``types.new_class()`` ，你可以保证所有的必要初始化步骤都能得到执行。
+比如，``types.new_class()`` 第四个参数的回调函数接受 ``__prepare__()`` 方法返回的映射对象。
+
+
+如果你仅仅只是想执行准备步骤，可以使用 ``types.prepare_class()`` 。例如：
+
+.. code-block:: python
+
+    import types
+    metaclass, kwargs, ns = types.prepare_class('Stock', (), {'metaclass': type})
+
+它会查找合适的元类并调用它的 ``__prepare__()`` 方法。
+然后这个元类保存它的关键字参数，准备命名空间后被返回。
+
+更多信息, 请参考 `PEP 3115 <https://www.python.org/dev/peps/pep-3115/>`_ ,
+以及 `Python documentation <https://docs.python.org/3/reference/datamodel.html#metaclasses>`_ .
+==============================
+9.19 在定义的时候初始化类的成员
+==============================
+
+----------
+问题
+----------
+你想在类被定义的时候就初始化一部分类的成员，而不是要等到实例被创建后。
+
+
+----------
+解决方案
+----------
+在类定义时就执行初始化或设置操作是元类的一个典型应用场景。本质上讲，一个元类会在定义时被触发，
+这时候你可以执行一些额外的操作。
+
+下面是一个例子，利用这个思路来创建类似于 ``collections`` 模块中的命名元组的类：
+
+.. code-block:: python
+
+    import operator
+
+    class StructTupleMeta(type):
+        def __init__(cls, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            for n, name in enumerate(cls._fields):
+                setattr(cls, name, property(operator.itemgetter(n)))
+
+    class StructTuple(tuple, metaclass=StructTupleMeta):
+        _fields = []
+        def __new__(cls, *args):
+            if len(args) != len(cls._fields):
+                raise ValueError('{} arguments required'.format(len(cls._fields)))
+            return super().__new__(cls,args)
+
+这段代码可以用来定义简单的基于元组的数据结构，如下所示：
+
+.. code-block:: python
+
+    class Stock(StructTuple):
+        _fields = ['name', 'shares', 'price']
+
+    class Point(StructTuple):
+        _fields = ['x', 'y']
+
+下面演示它如何工作：
+
+.. code-block:: python
+
+    >>> s = Stock('ACME', 50, 91.1)
+    >>> s
+    ('ACME', 50, 91.1)
+    >>> s[0]
+    'ACME'
+    >>> s.name
+    'ACME'
+    >>> s.shares * s.price
+    4555.0
+    >>> s.shares = 23
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    AttributeError: can't set attribute
+    >>>
+
+----------
+讨论
+----------
+
+这一小节中，类 ``StructTupleMeta`` 获取到类属性 ``_fields`` 中的属性名字列表，
+然后将它们转换成相应的可访问特定元组槽的方法。函数 ``operator.itemgetter()`` 创建一个访问器函数，
+然后 ``property()`` 函数将其转换成一个属性。
+
+本节最难懂的部分是知道不同的初始化步骤是什么时候发生的。
+``StructTupleMeta`` 中的 ``__init__()`` 方法只在每个类被定义时被调用一次。
+``cls`` 参数就是那个被定义的类。实际上，上述代码使用了 ``_fields`` 类变量来保存新的被定义的类，
+然后给它再添加一点新的东西。
+
+``StructTuple`` 类作为一个普通的基类，供其他使用者来继承。
+这个类中的 ``__new__()`` 方法用来构造新的实例。
+这里使用 ``__new__()`` 并不是很常见，主要是因为我们要修改元组的调用签名，
+使得我们可以像普通的实例调用那样创建实例。就像下面这样：
+
+.. code-block:: python
+
+    s = Stock('ACME', 50, 91.1) # OK
+    s = Stock(('ACME', 50, 91.1)) # Error
+
+跟 ``__init__()`` 不同的是，``__new__()`` 方法在实例被创建之前被触发。
+由于元组是不可修改的，所以一旦它们被创建了就不可能对它做任何改变。而 ``__init__()`` 会在实例创建的最后被触发，
+这样的话我们就可以做我们想做的了。这也是为什么 ``__new__()`` 方法已经被定义了。
+
+尽管本节很短，还是需要你能仔细研读，深入思考Python类是如何被定义的，实例是如何被创建的，
+还有就是元类和类的各个不同的方法究竟在什么时候被调用。
+
+`PEP 422 <http://www.python.org/dev/peps/pep-0422>`_
+提供了一个解决本节问题的另外一种方法。
+但是，截止到我写这本书的时候，它还没被采纳和接受。
+尽管如此，如果你使用的是Python 3.3或更高的版本，那么还是值得去看一下的。
+==============================
+9.20 利用函数注解实现方法重载
+==============================
+
+----------
+问题
+----------
+你已经学过怎样使用函数参数注解，那么你可能会想利用它来实现基于类型的方法重载。
+但是你不确定应该怎样去实现（或者到底行得通不）。
+
+----------
+解决方案
+----------
+本小节的技术是基于一个简单的技术，那就是Python允许参数注解，代码可以像下面这样写：
+
+.. code-block:: python
+
+    class Spam:
+        def bar(self, x:int, y:int):
+            print('Bar 1:', x, y)
+
+        def bar(self, s:str, n:int = 0):
+            print('Bar 2:', s, n)
+
+    s = Spam()
+    s.bar(2, 3) # Prints Bar 1: 2 3
+    s.bar('hello') # Prints Bar 2: hello 0
+
+下面是我们第一步的尝试，使用到了一个元类和描述器：
+
+.. code-block:: python
+
+    # multiple.py
+    import inspect
+    import types
+
+    class MultiMethod:
+        '''
+        Represents a single multimethod.
+        '''
+        def __init__(self, name):
+            self._methods = {}
+            self.__name__ = name
+
+        def register(self, meth):
+            '''
+            Register a new method as a multimethod
+            '''
+            sig = inspect.signature(meth)
+
+            # Build a type signature from the method's annotations
+            types = []
+            for name, parm in sig.parameters.items():
+                if name == 'self':
+                    continue
+                if parm.annotation is inspect.Parameter.empty:
+                    raise TypeError(
+                        'Argument {} must be annotated with a type'.format(name)
+                    )
+                if not isinstance(parm.annotation, type):
+                    raise TypeError(
+                        'Argument {} annotation must be a type'.format(name)
+                    )
+                if parm.default is not inspect.Parameter.empty:
+                    self._methods[tuple(types)] = meth
+                types.append(parm.annotation)
+
+            self._methods[tuple(types)] = meth
+
+        def __call__(self, *args):
+            '''
+            Call a method based on type signature of the arguments
+            '''
+            types = tuple(type(arg) for arg in args[1:])
+            meth = self._methods.get(types, None)
+            if meth:
+                return meth(*args)
+            else:
+                raise TypeError('No matching method for types {}'.format(types))
+
+        def __get__(self, instance, cls):
+            '''
+            Descriptor method needed to make calls work in a class
+            '''
+            if instance is not None:
+                return types.MethodType(self, instance)
+            else:
+                return self
+
+    class MultiDict(dict):
+        '''
+        Special dictionary to build multimethods in a metaclass
+        '''
+        def __setitem__(self, key, value):
+            if key in self:
+                # If key already exists, it must be a multimethod or callable
+                current_value = self[key]
+                if isinstance(current_value, MultiMethod):
+                    current_value.register(value)
+                else:
+                    mvalue = MultiMethod(key)
+                    mvalue.register(current_value)
+                    mvalue.register(value)
+                    super().__setitem__(key, mvalue)
+            else:
+                super().__setitem__(key, value)
+
+    class MultipleMeta(type):
+        '''
+        Metaclass that allows multiple dispatch of methods
+        '''
+        def __new__(cls, clsname, bases, clsdict):
+            return type.__new__(cls, clsname, bases, dict(clsdict))
+
+        @classmethod
+        def __prepare__(cls, clsname, bases):
+            return MultiDict()
+
+为了使用这个类，你可以像下面这样写：
+
+.. code-block:: python
+
+    class Spam(metaclass=MultipleMeta):
+        def bar(self, x:int, y:int):
+            print('Bar 1:', x, y)
+
+        def bar(self, s:str, n:int = 0):
+            print('Bar 2:', s, n)
+
+    # Example: overloaded __init__
+    import time
+
+    class Date(metaclass=MultipleMeta):
+        def __init__(self, year: int, month:int, day:int):
+            self.year = year
+            self.month = month
+            self.day = day
+
+        def __init__(self):
+            t = time.localtime()
+            self.__init__(t.tm_year, t.tm_mon, t.tm_mday)
+
+下面是一个交互示例来验证它能正确的工作：
+
+.. code-block:: python
+
+    >>> s = Spam()
+    >>> s.bar(2, 3)
+    Bar 1: 2 3
+    >>> s.bar('hello')
+    Bar 2: hello 0
+    >>> s.bar('hello', 5)
+    Bar 2: hello 5
+    >>> s.bar(2, 'hello')
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+        File "multiple.py", line 42, in __call__
+            raise TypeError('No matching method for types {}'.format(types))
+    TypeError: No matching method for types (<class 'int'>, <class 'str'>)
+    >>> # Overloaded __init__
+    >>> d = Date(2012, 12, 21)
+    >>> # Get today's date
+    >>> e = Date()
+    >>> e.year
+    2012
+    >>> e.month
+    12
+    >>> e.day
+    3
+    >>>
+
+----------
+讨论
+----------
+坦白来讲，相对于通常的代码而已本节使用到了很多的魔法代码。
+但是，它却能让我们深入理解元类和描述器的底层工作原理，
+并能加深对这些概念的印象。因此，就算你并不会立即去应用本节的技术，
+它的一些底层思想却会影响到其它涉及到元类、描述器和函数注解的编程技术。
+
+本节的实现中的主要思路其实是很简单的。``MutipleMeta`` 元类使用它的 ``__prepare__()`` 方法
+来提供一个作为 ``MultiDict`` 实例的自定义字典。这个跟普通字典不一样的是，
+``MultiDict`` 会在元素被设置的时候检查是否已经存在，如果存在的话，重复的元素会在 ``MultiMethod``
+实例中合并。
+
+``MultiMethod`` 实例通过构建从类型签名到函数的映射来收集方法。
+在这个构建过程中，函数注解被用来收集这些签名然后构建这个映射。
+这个过程在 ``MultiMethod.register()`` 方法中实现。
+这种映射的一个关键特点是对于多个方法，所有参数类型都必须要指定，否则就会报错。
+
+为了让 ``MultiMethod`` 实例模拟一个调用，它的 ``__call__()`` 方法被实现了。
+这个方法从所有排除 ``slef`` 的参数中构建一个类型元组，在内部map中查找这个方法，
+然后调用相应的方法。为了能让 ``MultiMethod`` 实例在类定义时正确操作，``__get__()`` 是必须得实现的。
+它被用来构建正确的绑定方法。比如：
+
+.. code-block:: python
+
+    >>> b = s.bar
+    >>> b
+    <bound method Spam.bar of <__main__.Spam object at 0x1006a46d0>>
+    >>> b.__self__
+    <__main__.Spam object at 0x1006a46d0>
+    >>> b.__func__
+    <__main__.MultiMethod object at 0x1006a4d50>
+    >>> b(2, 3)
+    Bar 1: 2 3
+    >>> b('hello')
+    Bar 2: hello 0
+    >>>
+
+不过本节的实现还有一些限制，其中一个是它不能使用关键字参数。例如：
+
+.. code-block:: python
+
+    >>> s.bar(x=2, y=3)
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    TypeError: __call__() got an unexpected keyword argument 'y'
+
+    >>> s.bar(s='hello')
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    TypeError: __call__() got an unexpected keyword argument 's'
+    >>>
+
+也许有其他的方法能添加这种支持，但是它需要一个完全不同的方法映射方式。
+问题在于关键字参数的出现是没有顺序的。当它跟位置参数混合使用时，
+那你的参数就会变得比较混乱了，这时候你不得不在 ``__call__()`` 方法中先去做个排序。
+
+同样对于继承也是有限制的，例如，类似下面这种代码就不能正常工作：
+
+.. code-block:: python
+
+    class A:
+        pass
+
+    class B(A):
+        pass
+
+    class C:
+        pass
+
+    class Spam(metaclass=MultipleMeta):
+        def foo(self, x:A):
+            print('Foo 1:', x)
+
+        def foo(self, x:C):
+            print('Foo 2:', x)
+
+原因是因为 ``x:A`` 注解不能成功匹配子类实例（比如B的实例），如下：
+
+.. code-block:: python
+
+    >>> s = Spam()
+    >>> a = A()
+    >>> s.foo(a)
+    Foo 1: <__main__.A object at 0x1006a5310>
+    >>> c = C()
+    >>> s.foo(c)
+    Foo 2: <__main__.C object at 0x1007a1910>
+    >>> b = B()
+    >>> s.foo(b)
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+        File "multiple.py", line 44, in __call__
+            raise TypeError('No matching method for types {}'.format(types))
+    TypeError: No matching method for types (<class '__main__.B'>,)
+    >>>
+
+作为使用元类和注解的一种替代方案，可以通过描述器来实现类似的效果。例如：
+
+.. code-block:: python
+
+    import types
+
+    class multimethod:
+        def __init__(self, func):
+            self._methods = {}
+            self.__name__ = func.__name__
+            self._default = func
+
+        def match(self, *types):
+            def register(func):
+                ndefaults = len(func.__defaults__) if func.__defaults__ else 0
+                for n in range(ndefaults+1):
+                    self._methods[types[:len(types) - n]] = func
+                return self
+            return register
+
+        def __call__(self, *args):
+            types = tuple(type(arg) for arg in args[1:])
+            meth = self._methods.get(types, None)
+            if meth:
+                return meth(*args)
+            else:
+                return self._default(*args)
+
+        def __get__(self, instance, cls):
+            if instance is not None:
+                return types.MethodType(self, instance)
+            else:
+                return self
+
+为了使用描述器版本，你需要像下面这样写：
+
+.. code-block:: python
+
+    class Spam:
+        @multimethod
+        def bar(self, *args):
+            # Default method called if no match
+            raise TypeError('No matching method for bar')
+
+        @bar.match(int, int)
+        def bar(self, x, y):
+            print('Bar 1:', x, y)
+
+        @bar.match(str, int)
+        def bar(self, s, n = 0):
+            print('Bar 2:', s, n)
+
+描述器方案同样也有前面提到的限制（不支持关键字参数和继承）。
+
+所有事物都是平等的，有好有坏，也许最好的办法就是在普通代码中避免使用方法重载。
+不过有些特殊情况下还是有意义的，比如基于模式匹配的方法重载程序中。
+举个例子，8.21小节中的访问者模式可以修改为一个使用方法重载的类。
+但是，除了这个以外，通常不应该使用方法重载（就简单的使用不同名称的方法就行了）。
+
+在Python社区对于实现方法重载的讨论已经由来已久。
+对于引发这个争论的原因，可以参考下Guido van Rossum的这篇博客：
+`Five-Minute Multimethods in Python <http://www.artima.com/weblogs/viewpost.jsp?thread=101605>`_
+
+==============================
+9.21 避免重复的属性方法
+==============================
+
+----------
+问题
+----------
+你在类中需要重复的定义一些执行相同逻辑的属性方法，比如进行类型检查，怎样去简化这些重复代码呢？
+
+----------
+解决方案
+----------
+考虑下一个简单的类，它的属性由属性方法包装：
+
+.. code-block:: python
+
+    class Person:
+        def __init__(self, name ,age):
+            self.name = name
+            self.age = age
+
+        @property
+        def name(self):
+            return self._name
+
+        @name.setter
+        def name(self, value):
+            if not isinstance(value, str):
+                raise TypeError('name must be a string')
+            self._name = value
+
+        @property
+        def age(self):
+            return self._age
+
+        @age.setter
+        def age(self, value):
+            if not isinstance(value, int):
+                raise TypeError('age must be an int')
+            self._age = value
+
+可以看到，为了实现属性值的类型检查我们写了很多的重复代码。
+只要你以后看到类似这样的代码，你都应该想办法去简化它。
+一个可行的方法是创建一个函数用来定义属性并返回它。例如：
+
+.. code-block:: python
+
+    def typed_property(name, expected_type):
+        storage_name = '_' + name
+
+        @property
+        def prop(self):
+            return getattr(self, storage_name)
+
+        @prop.setter
+        def prop(self, value):
+            if not isinstance(value, expected_type):
+                raise TypeError('{} must be a {}'.format(name, expected_type))
+            setattr(self, storage_name, value)
+
+        return prop
+
+    # Example use
+    class Person:
+        name = typed_property('name', str)
+        age = typed_property('age', int)
+
+        def __init__(self, name, age):
+            self.name = name
+            self.age = age
+
+----------
+讨论
+----------
+本节我们演示内部函数或者闭包的一个重要特性，它们很像一个宏。例子中的函数 ``typed_property()``
+看上去有点难理解，其实它所做的仅仅就是为你生成属性并返回这个属性对象。
+因此，当在一个类中使用它的时候，效果跟将它里面的代码放到类定义中去是一样的。
+尽管属性的 ``getter`` 和 ``setter`` 方法访问了本地变量如 ``name`` , ``expected_type``
+以及 ``storate_name`` ，这个很正常，这些变量的值会保存在闭包当中。
+
+
+我们还可以使用 ``functools.partial()`` 来稍稍改变下这个例子，很有趣。例如，你可以像下面这样：
+
+.. code-block:: python
+
+    from functools import partial
+
+    String = partial(typed_property, expected_type=str)
+    Integer = partial(typed_property, expected_type=int)
+
+    # Example:
+    class Person:
+        name = String('name')
+        age = Integer('age')
+
+        def __init__(self, name, age):
+            self.name = name
+            self.age = age
+
+其实你可以发现，这里的代码跟8.13小节中的类型系统描述器代码有些相似。
+
+==============================
+9.22 定义上下文管理器的简单方法
+==============================
+
+----------
+问题
+----------
+你想自己去实现一个新的上下文管理器，以便使用with语句。
+
+----------
+解决方案
+----------
+实现一个新的上下文管理器的最简单的方法就是使用 ``contexlib`` 模块中的 ``@contextmanager`` 装饰器。
+下面是一个实现了代码块计时功能的上下文管理器例子：
+
+.. code-block:: python
+
+    import time
+    from contextlib import contextmanager
+
+    @contextmanager
+    def timethis(label):
+        start = time.time()
+        try:
+            yield
+        finally:
+            end = time.time()
+            print('{}: {}'.format(label, end - start))
+
+    # Example use
+    with timethis('counting'):
+        n = 10000000
+        while n > 0:
+            n -= 1
+
+在函数 ``timethis()`` 中，``yield`` 之前的代码会在上下文管理器中作为 ``__enter__()`` 方法执行，
+所有在 ``yield`` 之后的代码会作为 ``__exit__()`` 方法执行。
+如果出现了异常，异常会在yield语句那里抛出。
+
+下面是一个更加高级一点的上下文管理器，实现了列表对象上的某种事务：
+
+.. code-block:: python
+
+    @contextmanager
+    def list_transaction(orig_list):
+        working = list(orig_list)
+        yield working
+        orig_list[:] = working
+
+这段代码的作用是任何对列表的修改只有当所有代码运行完成并且不出现异常的情况下才会生效。
+下面我们来演示一下：
+
+.. code-block:: python
+
+    >>> items = [1, 2, 3]
+    >>> with list_transaction(items) as working:
+    ...     working.append(4)
+    ...     working.append(5)
+    ...
+    >>> items
+    [1, 2, 3, 4, 5]
+    >>> with list_transaction(items) as working:
+    ...     working.append(6)
+    ...     working.append(7)
+    ...     raise RuntimeError('oops')
+    ...
+    Traceback (most recent call last):
+        File "<stdin>", line 4, in <module>
+    RuntimeError: oops
+    >>> items
+    [1, 2, 3, 4, 5]
+    >>>
+
+----------
+讨论
+----------
+通常情况下，如果要写一个上下文管理器，你需要定义一个类，里面包含一个 ``__enter__()`` 和一个
+``__exit__()`` 方法，如下所示：
+
+.. code-block:: python
+
+    import time
+
+    class timethis:
+        def __init__(self, label):
+            self.label = label
+
+        def __enter__(self):
+            self.start = time.time()
+
+        def __exit__(self, exc_ty, exc_val, exc_tb):
+            end = time.time()
+            print('{}: {}'.format(self.label, end - self.start))
+
+尽管这个也不难写，但是相比较写一个简单的使用 ``@contextmanager`` 注解的函数而言还是稍显乏味。
+
+``@contextmanager`` 应该仅仅用来写自包含的上下文管理函数。
+如果你有一些对象(比如一个文件、网络连接或锁)，需要支持 ``with`` 语句，那么你就需要单独实现
+``__enter__()`` 方法和 ``__exit__()`` 方法。
+==============================
+9.23 在局部变量域中执行代码
+==============================
+
+----------
+问题
+----------
+你想在使用范围内执行某个代码片段，并且希望在执行后所有的结果都不可见。
+
+----------
+解决方案
+----------
+为了理解这个问题，先试试一个简单场景。首先，在全局命名空间内执行一个代码片段：
+
+.. code-block:: python
+
+    >>> a = 13
+    >>> exec('b = a + 1')
+    >>> print(b)
+    14
+    >>>
+
+然后，再在一个函数中执行同样的代码：
+
+.. code-block:: python
+
+    >>> def test():
+    ...     a = 13
+    ...     exec('b = a + 1')
+    ...     print(b)
+    ...
+    >>> test()
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+        File "<stdin>", line 4, in test
+    NameError: global name 'b' is not defined
+    >>>
+
+可以看出，最后抛出了一个NameError异常，就跟在 ``exec()`` 语句从没执行过一样。
+要是你想在后面的计算中使用到 ``exec()`` 执行结果的话就会有问题了。
+
+为了修正这样的错误，你需要在调用 ``exec()`` 之前使用 ``locals()`` 函数来得到一个局部变量字典。
+之后你就能从局部字典中获取修改过后的变量值了。例如：
+
+.. code-block:: python
+
+    >>> def test():
+    ...     a = 13
+    ...     loc = locals()
+    ...     exec('b = a + 1')
+    ...     b = loc['b']
+    ...     print(b)
+    ...
+    >>> test()
+    14
+    >>>
+
+----------
+讨论
+----------
+实际上对于 ``exec()`` 的正确使用是比较难的。大多数情况下当你要考虑使用 ``exec()`` 的时候，
+还有另外更好的解决方案（比如装饰器、闭包、元类等等）。
+
+然而，如果你仍然要使用 ``exec()`` ，本节列出了一些如何正确使用它的方法。
+默认情况下，``exec()`` 会在调用者局部和全局范围内执行代码。然而，在函数里面，
+传递给 ``exec()`` 的局部范围是拷贝实际局部变量组成的一个字典。
+因此，如果 ``exec()`` 如果执行了修改操作，这种修改后的结果对实际局部变量值是没有影响的。
+下面是另外一个演示它的例子：
+
+.. code-block:: python
+
+    >>> def test1():
+    ...     x = 0
+    ...     exec('x += 1')
+    ...     print(x)
+    ...
+    >>> test1()
+    0
+    >>>
+
+上面代码里，当你调用 ``locals()`` 获取局部变量时，你获得的是传递给 ``exec()`` 的局部变量的一个拷贝。
+通过在代码执行后审查这个字典的值，那就能获取修改后的值了。下面是一个演示例子：
+
+.. code-block:: python
+
+    >>> def test2():
+    ...     x = 0
+    ...     loc = locals()
+    ...     print('before:', loc)
+    ...     exec('x += 1')
+    ...     print('after:', loc)
+    ...     print('x =', x)
+    ...
+    >>> test2()
+    before: {'x': 0}
+    after: {'loc': {...}, 'x': 1}
+    x = 0
+    >>>
+
+仔细观察最后一步的输出，除非你将 ``loc`` 中被修改后的值手动赋值给x，否则x变量值是不会变的。
+
+在使用 ``locals()`` 的时候，你需要注意操作顺序。每次它被调用的时候，
+``locals()`` 会获取局部变量值中的值并覆盖字典中相应的变量。
+请注意观察下下面这个试验的输出结果：
+
+.. code-block:: python
+
+    >>> def test3():
+    ...     x = 0
+    ...     loc = locals()
+    ...     print(loc)
+    ...     exec('x += 1')
+    ...     print(loc)
+    ...     locals()
+    ...     print(loc)
+    ...
+    >>> test3()
+    {'x': 0}
+    {'loc': {...}, 'x': 1}
+    {'loc': {...}, 'x': 0}
+    >>>
+
+注意最后一次调用 ``locals()`` 的时候x的值是如何被覆盖掉的。
+
+作为 ``locals()`` 的一个替代方案，你可以使用你自己的字典，并将它传递给 ``exec()`` 。例如：
+
+.. code-block:: python
+
+    >>> def test4():
+    ...     a = 13
+    ...     loc = { 'a' : a }
+    ...     glb = { }
+    ...     exec('b = a + 1', glb, loc)
+    ...     b = loc['b']
+    ...     print(b)
+    ...
+    >>> test4()
+    14
+    >>>
+
+大部分情况下，这种方式是使用 ``exec()`` 的最佳实践。
+你只需要保证全局和局部字典在后面代码访问时已经被初始化。
+
+还有一点，在使用 ``exec()`` 之前，你可能需要问下自己是否有其他更好的替代方案。
+大多数情况下当你要考虑使用 ``exec()`` 的时候，
+还有另外更好的解决方案，比如装饰器、闭包、元类，或其他一些元编程特性。
+==============================
+9.24 解析与分析Python源码
+==============================
+
+----------
+问题
+----------
+你想写解析并分析Python源代码的程序。
+
+----------
+解决方案
+----------
+大部分程序员知道Python能够计算或执行字符串形式的源代码。例如：
+
+.. code-block:: python
+
+    >>> x = 42
+    >>> eval('2 + 3*4 + x')
+    56
+    >>> exec('for i in range(10): print(i)')
+    0
+    1
+    2
+    3
+    4
+    5
+    6
+    7
+    8
+    9
+    >>>
+
+尽管如此，``ast`` 模块能被用来将Python源码编译成一个可被分析的抽象语法树（AST）。例如：
+
+.. code-block:: python
+
+    >>> import ast
+    >>> ex = ast.parse('2 + 3*4 + x', mode='eval')
+    >>> ex
+    <_ast.Expression object at 0x1007473d0>
+    >>> ast.dump(ex)
+    "Expression(body=BinOp(left=BinOp(left=Num(n=2), op=Add(),
+    right=BinOp(left=Num(n=3), op=Mult(), right=Num(n=4))), op=Add(),
+    right=Name(id='x', ctx=Load())))"
+
+    >>> top = ast.parse('for i in range(10): print(i)', mode='exec')
+    >>> top
+    <_ast.Module object at 0x100747390>
+    >>> ast.dump(top)
+    "Module(body=[For(target=Name(id='i', ctx=Store()),
+    iter=Call(func=Name(id='range', ctx=Load()), args=[Num(n=10)],
+    keywords=[], starargs=None, kwargs=None),
+    body=[Expr(value=Call(func=Name(id='print', ctx=Load()),
+    args=[Name(id='i', ctx=Load())], keywords=[], starargs=None,
+    kwargs=None))], orelse=[])])"
+    >>>
+
+分析源码树需要你自己更多的学习，它是由一系列AST节点组成的。
+分析这些节点最简单的方法就是定义一个访问者类，实现很多 ``visit_NodeName()`` 方法，
+``NodeName()`` 匹配那些你感兴趣的节点。下面是这样一个类，记录了哪些名字被加载、存储和删除的信息。
+
+.. code-block:: python
+
+    import ast
+
+    class CodeAnalyzer(ast.NodeVisitor):
+        def __init__(self):
+            self.loaded = set()
+            self.stored = set()
+            self.deleted = set()
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load):
+                self.loaded.add(node.id)
+            elif isinstance(node.ctx, ast.Store):
+                self.stored.add(node.id)
+            elif isinstance(node.ctx, ast.Del):
+                self.deleted.add(node.id)
+
+    # Sample usage
+    if __name__ == '__main__':
+        # Some Python code
+        code = '''
+        for i in range(10):
+            print(i)
+        del i
+        '''
+
+        # Parse into an AST
+        top = ast.parse(code, mode='exec')
+
+        # Feed the AST to analyze name usage
+        c = CodeAnalyzer()
+        c.visit(top)
+        print('Loaded:', c.loaded)
+        print('Stored:', c.stored)
+        print('Deleted:', c.deleted)
+
+如果你运行这个程序，你会得到下面这样的输出：
+
+.. code-block:: python
+
+    Loaded: {'i', 'range', 'print'}
+    Stored: {'i'}
+    Deleted: {'i'}
+
+最后，AST可以通过 ``compile()`` 函数来编译并执行。例如：
+
+.. code-block:: python
+
+    >>> exec(compile(top,'<stdin>', 'exec'))
+    0
+    1
+    2
+    3
+    4
+    5
+    6
+    7
+    8
+    9
+    >>>
+
+----------
+讨论
+----------
+当你能够分析源代码并从中获取信息的时候，你就能写很多代码分析、优化或验证工具了。
+例如，相比盲目的传递一些代码片段到类似 ``exec()`` 函数中，你可以先将它转换成一个AST，
+然后观察它的细节看它到底是怎样做的。
+你还可以写一些工具来查看某个模块的全部源码，并且在此基础上执行某些静态分析。
+
+需要注意的是，如果你知道自己在干啥，你还能够重写AST来表示新的代码。
+下面是一个装饰器例子，可以通过重新解析函数体源码、
+重写AST并重新创建函数代码对象来将全局访问变量降为函数体作用范围，
+
+.. code-block:: python
+
+    # namelower.py
+    import ast
+    import inspect
+
+    # Node visitor that lowers globally accessed names into
+    # the function body as local variables.
+    class NameLower(ast.NodeVisitor):
+        def __init__(self, lowered_names):
+            self.lowered_names = lowered_names
+
+        def visit_FunctionDef(self, node):
+            # Compile some assignments to lower the constants
+            code = '__globals = globals()\n'
+            code += '\n'.join("{0} = __globals['{0}']".format(name)
+                                for name in self.lowered_names)
+            code_ast = ast.parse(code, mode='exec')
+
+            # Inject new statements into the function body
+            node.body[:0] = code_ast.body
+
+            # Save the function object
+            self.func = node
+
+    # Decorator that turns global names into locals
+    def lower_names(*namelist):
+        def lower(func):
+            srclines = inspect.getsource(func).splitlines()
+            # Skip source lines prior to the @lower_names decorator
+            for n, line in enumerate(srclines):
+                if '@lower_names' in line:
+                    break
+
+            src = '\n'.join(srclines[n+1:])
+            # Hack to deal with indented code
+            if src.startswith((' ','\t')):
+                src = 'if 1:\n' + src
+            top = ast.parse(src, mode='exec')
+
+            # Transform the AST
+            cl = NameLower(namelist)
+            cl.visit(top)
+
+            # Execute the modified AST
+            temp = {}
+            exec(compile(top,'','exec'), temp, temp)
+
+            # Pull out the modified code object
+            func.__code__ = temp[func.__name__].__code__
+            return func
+        return lower
+
+为了使用这个代码，你可以像下面这样写：
+
+.. code-block:: python
+
+    INCR = 1
+    @lower_names('INCR')
+    def countdown(n):
+        while n > 0:
+            n -= INCR
+
+装饰器会将 ``countdown()`` 函数重写为类似下面这样子：
+
+.. code-block:: python
+
+    def countdown(n):
+        __globals = globals()
+        INCR = __globals['INCR']
+        while n > 0:
+            n -= INCR
+
+在性能测试中，它会让函数运行快20%
+
+现在，你是不是想为你所有的函数都加上这个装饰器呢？或许不会。
+但是，这却是对于一些高级技术比如AST操作、源码操作等等的一个很好的演示说明
+
+本节受另外一个在 ``ActiveState`` 中处理Python字节码的章节的启示。
+使用AST是一个更加高级点的技术，并且也更简单些。参考下面一节获得字节码的更多信息。
+
+==============================
+9.25 拆解Python字节码
+==============================
+
+----------
+问题
+----------
+你想通过将你的代码反编译成低级的字节码来查看它底层的工作机制。
+
+----------
+解决方案
+----------
+``dis`` 模块可以被用来输出任何Python函数的反编译结果。例如：
+
+.. code-block:: python
+
+    >>> def countdown(n):
+    ... while n > 0:
+    ...     print('T-minus', n)
+    ...     n -= 1
+    ... print('Blastoff!')
+    ...
+    >>> import dis
+    >>> dis.dis(countdown)
+    ...
+    >>>
+
+----------
+讨论
+----------
+当你想要知道你的程序底层的运行机制的时候，``dis`` 模块是很有用的。比如如果你想试着理解性能特征。
+被 ``dis()`` 函数解析的原始字节码如下所示：
+
+.. code-block:: python
+
+    >>> countdown.__code__.co_code
+    b"x'\x00|\x00\x00d\x01\x00k\x04\x00r)\x00t\x00\x00d\x02\x00|\x00\x00\x83
+    \x02\x00\x01|\x00\x00d\x03\x008}\x00\x00q\x03\x00Wt\x00\x00d\x04\x00\x83
+    \x01\x00\x01d\x00\x00S"
+    >>>
+
+如果你想自己解释这段代码，你需要使用一些在 ``opcode`` 模块中定义的常量。例如：
+
+.. code-block:: python
+
+    >>> c = countdown.__code__.co_code
+    >>> import opcode
+    >>> opcode.opname[c[0]]
+    >>> opcode.opname[c[0]]
+    'SETUP_LOOP'
+    >>> opcode.opname[c[3]]
+    'LOAD_FAST'
+    >>>
+
+奇怪的是，在 ``dis`` 模块中并没有函数让你以编程方式很容易的来处理字节码。
+不过，下面的生成器函数可以将原始字节码序列转换成 ``opcodes`` 和参数。
+
+.. code-block:: python
+
+    import opcode
+
+    def generate_opcodes(codebytes):
+        extended_arg = 0
+        i = 0
+        n = len(codebytes)
+        while i < n:
+            op = codebytes[i]
+            i += 1
+            if op >= opcode.HAVE_ARGUMENT:
+                oparg = codebytes[i] + codebytes[i+1]*256 + extended_arg
+                extended_arg = 0
+                i += 2
+                if op == opcode.EXTENDED_ARG:
+                    extended_arg = oparg * 65536
+                    continue
+            else:
+                oparg = None
+            yield (op, oparg)
+
+使用方法如下：
+
+.. code-block:: python
+
+    >>> for op, oparg in generate_opcodes(countdown.__code__.co_code):
+    ...     print(op, opcode.opname[op], oparg)
+
+这种方式很少有人知道，你可以利用它替换任何你想要替换的函数的原始字节码。
+下面我们用一个示例来演示整个过程：
+
+.. code-block:: python
+
+    >>> def add(x, y):
+    ...     return x + y
+    ...
+    >>> c = add.__code__
+    >>> c
+    <code object add at 0x1007beed0, file "<stdin>", line 1>
+    >>> c.co_code
+    b'|\x00\x00|\x01\x00\x17S'
+    >>>
+    >>> # Make a completely new code object with bogus byte code
+    >>> import types
+    >>> newbytecode = b'xxxxxxx'
+    >>> nc = types.CodeType(c.co_argcount, c.co_kwonlyargcount,
+    ...     c.co_nlocals, c.co_stacksize, c.co_flags, newbytecode, c.co_consts,
+    ...     c.co_names, c.co_varnames, c.co_filename, c.co_name,
+    ...     c.co_firstlineno, c.co_lnotab)
+    >>> nc
+    <code object add at 0x10069fe40, file "<stdin>", line 1>
+    >>> add.__code__ = nc
+    >>> add(2,3)
+    Segmentation fault
+
+你可以像这样耍大招让解释器奔溃。但是，对于编写更高级优化和元编程工具的程序员来讲，
+他们可能真的需要重写字节码。本节最后的部分演示了这个是怎样做到的。你还可以参考另外一个类似的例子：
+`this code on ActiveState <http://code.activestate.com/recipes/277940-decorator-for-bindingconstants-at-compile-time/>`_
+============================
+10.1 构建一个模块的层级包
+============================
+
+----------
+问题
+----------
+你想将你的代码组织成由很多分层模块构成的包。
+
+----------
+解决方案
+----------
+封装成包是很简单的。在文件系统上组织你的代码，并确保每个目录都定义了一个__init__.py文件。
+例如：
+
+.. code-block:: python
+
+    graphics/
+        __init__.py
+        primitive/
+            __init__.py
+            line.py
+            fill.py
+            text.py
+        formats/
+            __init__.py
+            png.py
+            jpg.py
+
+一旦你做到了这一点，你应该能够执行各种import语句，如下：
+
+.. code-block:: python
+
+    import graphics.primitive.line
+    from graphics.primitive import line
+    import graphics.formats.jpg as jpg
+
+----------
+讨论
+----------
+定义模块的层次结构就像在文件系统上建立目录结构一样容易。
+文件__init__.py的目的是要包含不同运行级别的包的可选的初始化代码。
+举个例子，如果你执行了语句import graphics， 文件graphics/__init__.py将被导入,建立graphics命名空间的内容。像import graphics.format.jpg这样导入，文件graphics/__init__.py和文件graphics/formats/__init__.py将在文件graphics/formats/jpg.py导入之前导入。
+
+
+绝大部分时候让__init__.py空着就好。但是有些情况下可能包含代码。
+举个例子，__init__.py能够用来自动加载子模块:
+
+.. code-block:: python
+
+    # graphics/formats/__init__.py
+    from . import jpg
+    from . import png
+
+
+像这样一个文件,用户可以仅仅通过import grahpics.formats来代替import graphics.formats.jpg以及import graphics.formats.png。
+
+
+__init__.py的其他常用用法包括将多个文件合并到一个逻辑命名空间，这将在10.4小节讨论。
+
+
+敏锐的程序员会发现，即使没有__init__.py文件存在，python仍然会导入包。如果你没有定义__init__.py时，实际上创建了一个所谓的“命名空间包”，这将在10.5小节讨论。万物平等，如果你着手创建一个新的包的话，包含一个__init__.py文件吧。
+============================
+10.2 控制模块被全部导入的内容
+============================
+
+----------
+问题
+----------
+当使用'from module import *' 语句时，希望对从模块或包导出的符号进行精确控制。
+
+
+----------
+解决方案
+----------
+在你的模块中定义一个变量 __all__ 来明确地列出需要导出的内容。
+
+举个例子:
+
+.. code-block:: python
+
+    # somemodule.py
+    def spam():
+        pass
+
+    def grok():
+        pass
+
+    blah = 42
+    # Only export 'spam' and 'grok'
+    __all__ = ['spam', 'grok']
+
+----------
+讨论
+----------
+尽管强烈反对使用 'from module import *', 但是在定义了大量变量名的模块中频繁使用。
+如果你不做任何事, 这样的导入将会导入所有不以下划线开头的。
+另一方面,如果定义了 __all__ , 那么只有被列举出的东西会被导出。
+
+
+
+如果你将 __all__ 定义成一个空列表, 没有东西将被导入。
+如果 __all__ 包含未定义的名字, 在导入时引起AttributeError。
+
+============================
+10.3 使用相对路径名导入包中子模块
+============================
+
+----------
+问题
+----------
+将代码组织成包,想用import语句从另一个包名没有硬编码过的包中导入子模块。
+
+
+
+----------
+解决方案
+----------
+使用包的相对导入，使一个模块导入同一个包的另一个模块
+举个例子，假设在你的文件系统上有mypackage包，组织如下：
+
+
+.. code-block:: python
+
+    mypackage/
+        __init__.py
+        A/
+            __init__.py
+            spam.py
+            grok.py
+        B/
+            __init__.py
+            bar.py
+
+如果模块mypackage.A.spam要导入同目录下的模块grok，它应该包括的import语句如下：
+
+
+.. code-block:: python
+
+    # mypackage/A/spam.py
+    from . import grok
+
+如果模块mypackage.A.spam要导入不同目录下的模块B.bar，它应该使用的import语句如下：
+
+
+.. code-block:: python
+
+    # mypackage/A/spam.py
+    from ..B import bar
+
+两个import语句都没包含顶层包名，而是使用了spam.py的相对路径。
+
+----------
+讨论
+----------
+在包内，既可以使用相对路径也可以使用绝对路径来导入。
+举个例子：
+
+.. code-block:: python
+
+    # mypackage/A/spam.py
+    from mypackage.A import grok # OK
+    from . import grok # OK
+    import grok # Error (not found)
+
+像mypackage.A这样使用绝对路径名的不利之处是这将顶层包名硬编码到你的源码中。如果你想重新组织它，你的代码将更脆，很难工作。 举个例子，如果你改变了包名，你就必须检查所有文件来修正源码。 同样，硬编码的名称会使移动代码变得困难。举个例子，也许有人想安装两个不同版本的软件包，只通过名称区分它们。 如果使用相对导入，那一切都ok，然而使用绝对路径名很可能会出问题。
+
+
+import语句的 ``.`` 和 ``..`` 看起来很滑稽, 但它指定目录名.为当前目录，..B为目录../B。这种语法只适用于import。
+举个例子：
+
+.. code-block:: python
+
+    from . import grok # OK
+    import .grok # ERROR
+
+尽管使用相对导入看起来像是浏览文件系统，但是不能到定义包的目录之外。也就是说，使用点的这种模式从不是包的目录中导入将会引发错误。
+
+
+最后，相对导入只适用于在合适的包中的模块。尤其是在顶层的脚本的简单模块中，它们将不起作用。如果包的部分被作为脚本直接执行，那它们将不起作用 
+例如：
+
+.. code-block:: python
+
+    % python3 mypackage/A/spam.py # Relative imports fail
+
+另一方面，如果你使用Python的-m选项来执行先前的脚本，相对导入将会正确运行。
+例如：
+
+
+.. code-block:: python
+
+    % python3 -m mypackage.A.spam # Relative imports work
+
+更多的包的相对导入的背景知识,请看 `PEP 328 <http://www.python.org/dev/peps/pep-0328>`_ .
+
+
+============================
+10.4 将模块分割成多个文件
+============================
+
+----------
+问题
+----------
+你想将一个模块分割成多个文件。但是你不想将分离的文件统一成一个逻辑模块时使已有的代码遭到破坏。
+
+
+----------
+解决方案
+----------
+程序模块可以通过变成包来分割成多个独立的文件。考虑下下面简单的模块：
+
+
+.. code-block:: python
+
+    # mymodule.py
+    class A:
+        def spam(self):
+            print('A.spam')
+
+    class B(A):
+        def bar(self):
+            print('B.bar')
+
+假设你想mymodule.py分为两个文件，每个定义的一个类。要做到这一点，首先用mymodule目录来替换文件mymodule.py。
+这这个目录下，创建以下文件：
+
+
+.. code-block:: python
+
+    mymodule/
+        __init__.py
+        a.py
+        b.py
+
+在a.py文件中插入以下代码：
+
+.. code-block:: python
+
+    # a.py
+    class A:
+        def spam(self):
+            print('A.spam')
+
+在b.py文件中插入以下代码：
+
+.. code-block:: python
+
+    # b.py
+    from .a import A
+    class B(A):
+        def bar(self):
+            print('B.bar')
+
+最后，在 __init__.py 中，将2个文件粘合在一起：
+
+.. code-block:: python
+
+    # __init__.py
+    from .a import A
+    from .b import B
+
+如果按照这些步骤，所产生的包MyModule将作为一个单一的逻辑模块：
+
+.. code-block:: python
+
+    >>> import mymodule
+    >>> a = mymodule.A()
+    >>> a.spam()
+    A.spam
+    >>> b = mymodule.B()
+    >>> b.bar()
+    B.bar
+    >>>
+
+----------
+讨论
+----------
+在这个章节中的主要问题是一个设计问题，不管你是否希望用户使用很多小模块或只是一个模块。举个例子，在一个大型的代码库中，你可以将这一切都分割成独立的文件，让用户使用大量的import语句，就像这样：
+
+
+.. code-block:: python
+
+    from mymodule.a import A
+    from mymodule.b import B
+    ...
+
+这样能工作，但这让用户承受更多的负担，用户要知道不同的部分位于何处。通常情况下，将这些统一起来，使用一条import将更加容易，就像这样：
+
+
+.. code-block:: python
+
+    from mymodule import A, B
+
+对后者而言，让mymodule成为一个大的源文件是最常见的。但是，这一章节展示了如何合并多个文件合并成一个单一的逻辑命名空间。
+这样做的关键是创建一个包目录，使用 __init__.py 文件来将每部分粘合在一起。
+
+
+当一个模块被分割，你需要特别注意交叉引用的文件名。举个例子，在这一章节中，B类需要访问A类作为基类。用包的相对导入 from .a import A 来获取。
+
+
+整个章节都使用包的相对导入来避免将顶层模块名硬编码到源代码中。这使得重命名模块或者将它移动到别的位置更容易。（见10.3小节）
+
+
+作为这一章节的延伸，将介绍延迟导入。如图所示，__init__.py文件一次导入所有必需的组件的。但是对于一个很大的模块，可能你只想组件在需要时被加载。
+要做到这一点，__init__.py有细微的变化：
+
+.. code-block:: python
+
+    # __init__.py
+    def A():
+        from .a import A
+        return A()
+
+    def B():
+        from .b import B
+        return B()
+
+在这个版本中，类A和类B被替换为在第一次访问时加载所需的类的函数。对于用户，这看起来不会有太大的不同。
+例如：
+
+.. code-block:: python
+
+    >>> import mymodule
+    >>> a = mymodule.A()
+    >>> a.spam()
+    A.spam
+    >>>
+
+延迟加载的主要缺点是继承和类型检查可能会中断。你可能会稍微改变你的代码，例如:
+
+.. code-block:: python
+
+    if isinstance(x, mymodule.A): # Error
+    ...
+
+    if isinstance(x, mymodule.a.A): # Ok
+    ...
+
+延迟加载的真实例子, 见标准库 multiprocessing/__init__.py 的源码.
+
+
+==============================
+10.5 利用命名空间导入目录分散的代码
+==============================
+
+----------
+问题
+----------
+你可能有大量的代码，由不同的人来分散地维护。每个部分被组织为文件目录，如一个包。然而，你希望能用共同的包前缀将所有组件连接起来，不是将每一个部分作为独立的包来安装。
+
+----------
+解决方案
+----------
+从本质上讲，你要定义一个顶级Python包，作为一个大集合分开维护子包的命名空间。这个问题经常出现在大的应用框架中，框架开发者希望鼓励用户发布插件或附加包。
+
+
+在统一不同的目录里统一相同的命名空间，但是要删去用来将组件联合起来的__init__.py文件。假设你有Python代码的两个不同的目录如下：
+
+
+.. code-block:: python
+
+    foo-package/
+        spam/
+            blah.py
+
+    bar-package/
+        spam/
+            grok.py
+
+在这2个目录里，都有着共同的命名空间spam。在任何一个目录里都没有__init__.py文件。
+
+
+让我们看看，如果将foo-package和bar-package都加到python模块路径并尝试导入会发生什么
+
+
+.. code-block:: python
+
+    >>> import sys
+    >>> sys.path.extend(['foo-package', 'bar-package'])
+    >>> import spam.blah
+    >>> import spam.grok
+    >>>
+
+两个不同的包目录被合并到一起，你可以导入spam.blah和spam.grok，并且它们能够工作。
+
+
+----------
+讨论
+----------
+在这里工作的机制被称为“包命名空间”的一个特征。从本质上讲，包命名空间是一种特殊的封装设计，为合并不同的目录的代码到一个共同的命名空间。对于大的框架，这可能是有用的，因为它允许一个框架的部分被单独地安装下载。它也使人们能够轻松地为这样的框架编写第三方附加组件和其他扩展。
+
+包命名空间的关键是确保顶级目录中没有__init__.py文件来作为共同的命名空间。缺失__init__.py文件使得在导入包的时候会发生有趣的事情：这并没有产生错误，解释器创建了一个由所有包含匹配包名的目录组成的列表。特殊的包命名空间模块被创建，只读的目录列表副本被存储在其__path__变量中。
+举个例子：
+
+.. code-block:: python
+
+    >>> import spam
+    >>> spam.__path__
+    _NamespacePath(['foo-package/spam', 'bar-package/spam'])
+    >>>
+
+在定位包的子组件时，目录__path__将被用到(例如, 当导入spam.grok或者spam.blah的时候).
+
+包命名空间的一个重要特点是任何人都可以用自己的代码来扩展命名空间。举个例子，假设你自己的代码目录像这样：
+
+
+.. code-block:: python
+
+    my-package/
+        spam/
+            custom.py
+
+如果你将你的代码目录和其他包一起添加到sys.path，这将无缝地合并到别的spam包目录中：
+
+
+.. code-block:: python
+
+    >>> import spam.custom
+    >>> import spam.grok
+    >>> import spam.blah
+    >>>
+
+一个包是否被作为一个包命名空间的主要方法是检查其__file__属性。如果没有，那包是个命名空间。这也可以由其字符表现形式中的“namespace”这个词体现出来。
+
+
+.. code-block:: python
+
+    >>> spam.__file__
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    AttributeError: 'module' object has no attribute '__file__'
+    >>> spam
+    <module 'spam' (namespace)>
+    >>>
+
+更多的包命名空间信息可以查看
+`PEP 420 <https://www.python.org/dev/peps/pep-0420/>`_.
+
+==============================
+10.6 重新加载模块
+==============================
+
+----------
+问题
+----------
+你想重新加载已经加载的模块，因为你对其源码进行了修改。
+
+----------
+解决方案
+----------
+使用imp.reload()来重新加载先前加载的模块。举个例子：
+
+.. code-block:: python
+
+    >>> import spam
+    >>> import imp
+    >>> imp.reload(spam)
+    <module 'spam' from './spam.py'>
+    >>>
+
+----------
+讨论
+----------
+重新加载模块在开发和调试过程中常常很有用。但在生产环境中的代码使用会不安全，因为它并不总是像您期望的那样工作。
+
+
+reload()擦除了模块底层字典的内容，并通过重新执行模块的源代码来刷新它。模块对象本身的身份保持不变。因此，该操作在程序中所有已经被导入了的地方更新了模块。
+
+
+尽管如此，reload()没有更新像"from module import name"这样使用import语句导入的定义。举个例子：
+
+.. code-block:: python
+
+    # spam.py
+    def bar():
+        print('bar')
+
+    def grok():
+        print('grok')
+
+现在启动交互式会话：
+
+.. code-block:: python
+
+    >>> import spam
+    >>> from spam import grok
+    >>> spam.bar()
+    bar
+    >>> grok()
+    grok
+    >>>
+
+不退出Python修改spam.py的源码，将grok()函数改成这样：
+
+
+.. code-block:: python
+
+    def grok():
+        print('New grok')
+
+现在回到交互式会话，重新加载模块，尝试下这个实验：
+
+.. code-block:: python
+
+    >>> import imp
+    >>> imp.reload(spam)
+    <module 'spam' from './spam.py'>
+    >>> spam.bar()
+    bar
+    >>> grok() # Notice old output
+    grok
+    >>> spam.grok() # Notice new output
+    New grok
+    >>>
+
+在这个例子中，你看到有2个版本的grok()函数被加载。通常来说，这不是你想要的，而是令人头疼的事。
+
+
+因此，在生产环境中可能需要避免重新加载模块。在交互环境下调试，解释程序并试图弄懂它。
+===========================
+10.7 运行目录或压缩文件
+===========================
+
+----------
+问题
+----------
+您有一个已成长为包含多个文件的应用，它已远不再是一个简单的脚本，你想向用户提供一些简单的方法运行这个程序。
+
+----------
+解决方案
+----------
+如果你的应用程序已经有多个文件，你可以把你的应用程序放进它自己的目录并添加一个__main__.py文件。 举个例子，你可以像这样创建目录：
+
+.. code-block:: python
+
+    myapplication/
+        spam.py
+        bar.py
+        grok.py
+        __main__.py
+
+如果__main__.py存在，你可以简单地在顶级目录运行Python解释器：
+
+.. code-block:: python
+
+    bash % python3 myapplication
+
+解释器将执行__main__.py文件作为主程序。
+
+如果你将你的代码打包成zip文件，这种技术同样也适用，举个例子：
+
+.. code-block:: python
+
+    bash % ls
+    spam.py bar.py grok.py __main__.py
+    bash % zip -r myapp.zip *.py
+    bash % python3 myapp.zip
+    ... output from __main__.py ...
+
+----------
+讨论
+----------
+创建一个目录或zip文件并添加__main__.py文件来将一个更大的Python应用打包是可行的。这和作为标准库被安装到Python库的代码包是有一点区别的。相反，这只是让别人执行的代码包。
+
+
+由于目录和zip文件与正常文件有一点不同，你可能还需要增加一个shell脚本，使执行更加容易。例如，如果代码文件名为myapp.zip，你可以创建这样一个顶级脚本：
+
+
+.. code-block:: bash
+
+    #!/usr/bin/env python3 /usr/local/bin/myapp.zip
+
+================================
+10.8 读取位于包中的数据文件
+================================
+
+----------
+问题
+----------
+你的包中包含代码需要去读取的数据文件。你需要尽可能地用最便捷的方式来做这件事。
+
+----------
+解决方案
+----------
+假设你的包中的文件组织成如下：
+
+.. code-block:: python
+
+    mypackage/
+        __init__.py
+        somedata.dat
+        spam.py
+
+现在假设spam.py文件需要读取somedata.dat文件中的内容。你可以用以下代码来完成：
+
+.. code-block:: python
+
+    # spam.py
+    import pkgutil
+    data = pkgutil.get_data(__package__, 'somedata.dat')
+
+由此产生的变量是包含该文件的原始内容的字节字符串。
+
+----------
+讨论
+----------
+要读取数据文件，你可能会倾向于编写使用内置的I/ O功能的代码，如open()。但是这种方法也有一些问题。
+
+
+首先，一个包对解释器的当前工作目录几乎没有控制权。因此，编程时任何I/O操作都必须使用绝对文件名。由于每个模块包含有完整路径的__file__变量，这弄清楚它的路径不是不可能，但它很凌乱。
+
+
+第二，包通常安装作为.zip或.egg文件，这些文件并不像在文件系统上的一个普通目录里那样被保存。因此，你试图用open()对一个包含数据文件的归档文件进行操作，它根本不会工作。
+
+
+pkgutil.get_data()函数是一个读取数据文件的高级工具，不用管包是如何安装以及安装在哪。它只是工作并将文件内容以字节字符串返回给你
+
+
+get_data()的第一个参数是包含包名的字符串。你可以直接使用包名，也可以使用特殊的变量，比如__package__。第二个参数是包内文件的相对名称。如果有必要，可以使用标准的Unix命名规范到不同的目录，只要最后的目录仍然位于包中。
+================================
+10.9 将文件夹加入到sys.path
+================================
+
+----------
+问题
+----------
+你无法导入你的Python代码因为它所在的目录不在sys.path里。你想将添加新目录到Python路径，但是不想硬链接到你的代码。
+
+
+----------
+解决方案
+----------
+有两种常用的方式将新目录添加到sys.path。第一种，你可以使用PYTHONPATH环境变量来添加。例如：
+
+.. code-block:: python
+
+    bash % env PYTHONPATH=/some/dir:/other/dir python3
+    Python 3.3.0 (default, Oct 4 2012, 10:17:33)
+    [GCC 4.2.1 (Apple Inc. build 5666) (dot 3)] on darwin
+    Type "help", "copyright", "credits" or "license" for more information.
+    >>> import sys
+    >>> sys.path
+    ['', '/some/dir', '/other/dir', ...]
+    >>>
+
+在自定义应用程序中，这样的环境变量可在程序启动时设置或通过shell脚本。
+
+第二种方法是创建一个.pth文件，将目录列举出来，像这样：
+
+.. code-block:: python
+
+    # myapplication.pth
+    /some/dir
+    /other/dir
+
+这个.pth文件需要放在某个Python的site-packages目录，通常位于/usr/local/lib/python3.3/site-packages 或者 ~/.local/lib/python3.3/sitepackages。当解释器启动时，.pth文件里列举出来的存在于文件系统的目录将被添加到sys.path。安装一个.pth文件可能需要管理员权限，如果它被添加到系统级的Python解释器。
+
+
+----------
+讨论
+----------
+比起费力地找文件，你可能会倾向于写一个代码手动调节sys.path的值。例如:
+
+.. code-block:: python
+
+    import sys
+    sys.path.insert(0, '/some/dir')
+    sys.path.insert(0, '/other/dir')
+
+虽然这能“工作”，它是在实践中极为脆弱，应尽量避免使用。这种方法的问题是，它将目录名硬编码到了你的源代码。如果你的代码被移到一个新的位置，这会导致维护问题。更好的做法是在不修改源代码的情况下，将path配置到其他地方。如果您使用模块级的变量来精心构造一个适当的绝对路径，有时你可以解决硬编码目录的问题，比如__file__。举个例子：
+
+.. code-block:: python
+
+    import sys
+    from os.path import abspath, join, dirname
+    sys.path.insert(0, join(abspath(dirname(__file__)), 'src'))
+
+这将src目录添加到path里，和执行插入步骤的代码在同一个目录里。
+
+site-packages目录是第三方包和模块安装的目录。如果你手动安装你的代码，它将被安装到site-packages目录。虽然用于配置path的.pth文件必须放置在site-packages里，但它配置的路径可以是系统上任何你希望的目录。因此，你可以把你的代码放在一系列不同的目录，只要那些目录包含在.pth文件里。
+
+================================
+10.10 通过字符串名导入模块
+================================
+
+----------
+问题
+----------
+你想导入一个模块，但是模块的名字在字符串里。你想对字符串调用导入命令。
+
+----------
+解决方案
+----------
+使用importlib.import_module()函数来手动导入名字为字符串给出的一个模块或者包的一部分。举个例子：
+
+.. code-block:: python
+
+    >>> import importlib
+    >>> math = importlib.import_module('math')
+    >>> math.sin(2)
+    0.9092974268256817
+    >>> mod = importlib.import_module('urllib.request')
+    >>> u = mod.urlopen('http://www.python.org')
+    >>>
+
+import_module只是简单地执行和import相同的步骤，但是返回生成的模块对象。你只需要将其存储在一个变量，然后像正常的模块一样使用。
+
+
+如果你正在使用的包，import_module()也可用于相对导入。但是，你需要给它一个额外的参数。例如：
+
+.. code-block:: python
+
+    import importlib
+    # Same as 'from . import b'
+    b = importlib.import_module('.b', __package__)
+
+----------
+讨论
+----------
+使用import_module()手动导入模块的问题通常出现在以某种方式编写修改或覆盖模块的代码时候。例如，也许你正在执行某种自定义导入机制，需要通过名称来加载一个模块，通过补丁加载代码。
+
+
+在旧的代码，有时你会看到用于导入的内建函数__import__()。尽管它能工作，但是importlib.import_module() 通常更容易使用。
+
+自定义导入过程的高级实例见10.11小节
+
+================================
+10.11 通过钩子远程加载模块
+================================
+
+----------
+问题
+----------
+你想自定义Python的import语句，使得它能从远程机器上面透明的加载模块。
+
+----------
+解决方案
+----------
+首先要提出来的是安全问题。本节讨论的思想如果没有一些额外的安全和认知机制的话会很糟糕。
+也就是说，我们的主要目的是深入分析Python的import语句机制。
+如果你理解了本节内部原理，你就能够为其他任何目的而自定义import。
+有了这些，让我们继续向前走。
+
+本节核心是设计导入语句的扩展功能。有很多种方法可以做这个，
+不过为了演示的方便，我们开始先构造下面这个Python代码结构：
+
+::
+
+    testcode/
+        spam.py
+        fib.py
+        grok/
+            __init__.py
+            blah.py
+
+这些文件的内容并不重要，不过我们在每个文件中放入了少量的简单语句和函数，
+这样你可以测试它们并查看当它们被导入时的输出。例如：
+
+.. code-block:: python
+
+    # spam.py
+    print("I'm spam")
+
+    def hello(name):
+        print('Hello %s' % name)
+
+    # fib.py
+    print("I'm fib")
+
+    def fib(n):
+        if n < 2:
+            return 1
+        else:
+            return fib(n-1) + fib(n-2)
+
+    # grok/__init__.py
+    print("I'm grok.__init__")
+
+    # grok/blah.py
+    print("I'm grok.blah")
+
+这里的目的是允许这些文件作为模块被远程访问。
+也许最简单的方式就是将它们发布到一个web服务器上面。在testcode目录中像下面这样运行Python：
+
+::
+
+    bash % cd testcode
+    bash % python3 -m http.server 15000
+    Serving HTTP on 0.0.0.0 port 15000 ...
+
+服务器运行起来后再启动一个单独的Python解释器。
+确保你可以使用 ``urllib`` 访问到远程文件。例如：
+
+.. code-block:: python
+
+    >>> from urllib.request import urlopen
+    >>> u = urlopen('http://localhost:15000/fib.py')
+    >>> data = u.read().decode('utf-8')
+    >>> print(data)
+    # fib.py
+    print("I'm fib")
+
+    def fib(n):
+        if n < 2:
+            return 1
+        else:
+            return fib(n-1) + fib(n-2)
+    >>>
+
+从这个服务器加载源代码是接下来本节的基础。
+为了替代手动的通过 ``urlopen()`` 来收集源文件，
+我们通过自定义import语句来在后台自动帮我们做到。
+
+加载远程模块的第一种方法是创建一个显式的加载函数来完成它。例如：
+
+.. code-block:: python
+
+    import imp
+    import urllib.request
+    import sys
+
+    def load_module(url):
+        u = urllib.request.urlopen(url)
+        source = u.read().decode('utf-8')
+        mod = sys.modules.setdefault(url, imp.new_module(url))
+        code = compile(source, url, 'exec')
+        mod.__file__ = url
+        mod.__package__ = ''
+        exec(code, mod.__dict__)
+        return mod
+
+这个函数会下载源代码，并使用 ``compile()`` 将其编译到一个代码对象中，
+然后在一个新创建的模块对象的字典中来执行它。下面是使用这个函数的方式：
+
+.. code-block:: python
+
+    >>> fib = load_module('http://localhost:15000/fib.py')
+    I'm fib
+    >>> fib.fib(10)
+    89
+    >>> spam = load_module('http://localhost:15000/spam.py')
+    I'm spam
+    >>> spam.hello('Guido')
+    Hello Guido
+    >>> fib
+    <module 'http://localhost:15000/fib.py' from 'http://localhost:15000/fib.py'>
+    >>> spam
+    <module 'http://localhost:15000/spam.py' from 'http://localhost:15000/spam.py'>
+    >>>
+
+正如你所见，对于简单的模块这个是行得通的。
+不过它并没有嵌入到通常的import语句中，如果要支持更高级的结构比如包就需要更多的工作了。
+
+一个更酷的做法是创建一个自定义导入器。第一种方法是创建一个元路径导入器。如下：
+
+.. code-block:: python
+
+    # urlimport.py
+    import sys
+    import importlib.abc
+    import imp
+    from urllib.request import urlopen
+    from urllib.error import HTTPError, URLError
+    from html.parser import HTMLParser
+
+    # Debugging
+    import logging
+    log = logging.getLogger(__name__)
+
+    # Get links from a given URL
+    def _get_links(url):
+        class LinkParser(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                if tag == 'a':
+                    attrs = dict(attrs)
+                    links.add(attrs.get('href').rstrip('/'))
+        links = set()
+        try:
+            log.debug('Getting links from %s' % url)
+            u = urlopen(url)
+            parser = LinkParser()
+            parser.feed(u.read().decode('utf-8'))
+        except Exception as e:
+            log.debug('Could not get links. %s', e)
+        log.debug('links: %r', links)
+        return links
+
+    class UrlMetaFinder(importlib.abc.MetaPathFinder):
+        def __init__(self, baseurl):
+            self._baseurl = baseurl
+            self._links = { }
+            self._loaders = { baseurl : UrlModuleLoader(baseurl) }
+
+        def find_module(self, fullname, path=None):
+            log.debug('find_module: fullname=%r, path=%r', fullname, path)
+            if path is None:
+                baseurl = self._baseurl
+            else:
+                if not path[0].startswith(self._baseurl):
+                    return None
+                baseurl = path[0]
+            parts = fullname.split('.')
+            basename = parts[-1]
+            log.debug('find_module: baseurl=%r, basename=%r', baseurl, basename)
+
+            # Check link cache
+            if basename not in self._links:
+                self._links[baseurl] = _get_links(baseurl)
+
+            # Check if it's a package
+            if basename in self._links[baseurl]:
+                log.debug('find_module: trying package %r', fullname)
+                fullurl = self._baseurl + '/' + basename
+                # Attempt to load the package (which accesses __init__.py)
+                loader = UrlPackageLoader(fullurl)
+                try:
+                    loader.load_module(fullname)
+                    self._links[fullurl] = _get_links(fullurl)
+                    self._loaders[fullurl] = UrlModuleLoader(fullurl)
+                    log.debug('find_module: package %r loaded', fullname)
+                except ImportError as e:
+                    log.debug('find_module: package failed. %s', e)
+                    loader = None
+                return loader
+            # A normal module
+            filename = basename + '.py'
+            if filename in self._links[baseurl]:
+                log.debug('find_module: module %r found', fullname)
+                return self._loaders[baseurl]
+            else:
+                log.debug('find_module: module %r not found', fullname)
+                return None
+
+        def invalidate_caches(self):
+            log.debug('invalidating link cache')
+            self._links.clear()
+
+    # Module Loader for a URL
+    class UrlModuleLoader(importlib.abc.SourceLoader):
+        def __init__(self, baseurl):
+            self._baseurl = baseurl
+            self._source_cache = {}
+
+        def module_repr(self, module):
+            return '<urlmodule %r from %r>' % (module.__name__, module.__file__)
+
+        # Required method
+        def load_module(self, fullname):
+            code = self.get_code(fullname)
+            mod = sys.modules.setdefault(fullname, imp.new_module(fullname))
+            mod.__file__ = self.get_filename(fullname)
+            mod.__loader__ = self
+            mod.__package__ = fullname.rpartition('.')[0]
+            exec(code, mod.__dict__)
+            return mod
+
+        # Optional extensions
+        def get_code(self, fullname):
+            src = self.get_source(fullname)
+            return compile(src, self.get_filename(fullname), 'exec')
+
+        def get_data(self, path):
+            pass
+
+        def get_filename(self, fullname):
+            return self._baseurl + '/' + fullname.split('.')[-1] + '.py'
+
+        def get_source(self, fullname):
+            filename = self.get_filename(fullname)
+            log.debug('loader: reading %r', filename)
+            if filename in self._source_cache:
+                log.debug('loader: cached %r', filename)
+                return self._source_cache[filename]
+            try:
+                u = urlopen(filename)
+                source = u.read().decode('utf-8')
+                log.debug('loader: %r loaded', filename)
+                self._source_cache[filename] = source
+                return source
+            except (HTTPError, URLError) as e:
+                log.debug('loader: %r failed. %s', filename, e)
+                raise ImportError("Can't load %s" % filename)
+
+        def is_package(self, fullname):
+            return False
+
+    # Package loader for a URL
+    class UrlPackageLoader(UrlModuleLoader):
+        def load_module(self, fullname):
+            mod = super().load_module(fullname)
+            mod.__path__ = [ self._baseurl ]
+            mod.__package__ = fullname
+
+        def get_filename(self, fullname):
+            return self._baseurl + '/' + '__init__.py'
+
+        def is_package(self, fullname):
+            return True
+
+    # Utility functions for installing/uninstalling the loader
+    _installed_meta_cache = { }
+    def install_meta(address):
+        if address not in _installed_meta_cache:
+            finder = UrlMetaFinder(address)
+            _installed_meta_cache[address] = finder
+            sys.meta_path.append(finder)
+            log.debug('%r installed on sys.meta_path', finder)
+
+    def remove_meta(address):
+        if address in _installed_meta_cache:
+            finder = _installed_meta_cache.pop(address)
+            sys.meta_path.remove(finder)
+            log.debug('%r removed from sys.meta_path', finder)
+
+下面是一个交互会话，演示了如何使用前面的代码：
+
+.. code-block:: python
+
+    >>> # importing currently fails
+    >>> import fib
+    Traceback (most recent call last):
+    File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+    >>> # Load the importer and retry (it works)
+    >>> import urlimport
+    >>> urlimport.install_meta('http://localhost:15000')
+    >>> import fib
+    I'm fib
+    >>> import spam
+    I'm spam
+    >>> import grok.blah
+    I'm grok.__init__
+    I'm grok.blah
+    >>> grok.blah.__file__
+    'http://localhost:15000/grok/blah.py'
+    >>>
+
+这个特殊的方案会安装一个特别的查找器 ``UrlMetaFinder`` 实例，
+作为 ``sys.meta_path`` 中最后的实体。
+当模块被导入时，会依据 ``sys.meta_path`` 中的查找器定位模块。
+在这个例子中，``UrlMetaFinder`` 实例是最后一个查找器方案，
+当模块在任何一个普通地方都找不到的时候就触发它。
+
+作为常见的实现方案，``UrlMetaFinder`` 类包装在一个用户指定的URL上。
+在内部，查找器通过抓取指定URL的内容构建合法的链接集合。
+导入的时候，模块名会跟已有的链接作对比。如果找到了一个匹配的，
+一个单独的 ``UrlModuleLoader`` 类被用来从远程机器上加载源代码并创建最终的模块对象。
+这里缓存链接的一个原因是避免不必要的HTTP请求重复导入。
+
+自定义导入的第二种方法是编写一个钩子直接嵌入到 ``sys.path`` 变量中去，
+识别某些目录命名模式。
+在 ``urlimport.py`` 中添加如下的类和支持函数：
+
+.. code-block:: python
+
+    # urlimport.py
+    # ... include previous code above ...
+    # Path finder class for a URL
+    class UrlPathFinder(importlib.abc.PathEntryFinder):
+        def __init__(self, baseurl):
+            self._links = None
+            self._loader = UrlModuleLoader(baseurl)
+            self._baseurl = baseurl
+
+        def find_loader(self, fullname):
+            log.debug('find_loader: %r', fullname)
+            parts = fullname.split('.')
+            basename = parts[-1]
+            # Check link cache
+            if self._links is None:
+                self._links = [] # See discussion
+                self._links = _get_links(self._baseurl)
+
+            # Check if it's a package
+            if basename in self._links:
+                log.debug('find_loader: trying package %r', fullname)
+                fullurl = self._baseurl + '/' + basename
+                # Attempt to load the package (which accesses __init__.py)
+                loader = UrlPackageLoader(fullurl)
+                try:
+                    loader.load_module(fullname)
+                    log.debug('find_loader: package %r loaded', fullname)
+                except ImportError as e:
+                    log.debug('find_loader: %r is a namespace package', fullname)
+                    loader = None
+                return (loader, [fullurl])
+
+            # A normal module
+            filename = basename + '.py'
+            if filename in self._links:
+                log.debug('find_loader: module %r found', fullname)
+                return (self._loader, [])
+            else:
+                log.debug('find_loader: module %r not found', fullname)
+                return (None, [])
+
+        def invalidate_caches(self):
+            log.debug('invalidating link cache')
+            self._links = None
+
+    # Check path to see if it looks like a URL
+    _url_path_cache = {}
+    def handle_url(path):
+        if path.startswith(('http://', 'https://')):
+            log.debug('Handle path? %s. [Yes]', path)
+            if path in _url_path_cache:
+                finder = _url_path_cache[path]
+            else:
+                finder = UrlPathFinder(path)
+                _url_path_cache[path] = finder
+            return finder
+        else:
+            log.debug('Handle path? %s. [No]', path)
+
+    def install_path_hook():
+        sys.path_hooks.append(handle_url)
+        sys.path_importer_cache.clear()
+        log.debug('Installing handle_url')
+
+    def remove_path_hook():
+        sys.path_hooks.remove(handle_url)
+        sys.path_importer_cache.clear()
+        log.debug('Removing handle_url')
+
+要使用这个路径查找器，你只需要在 ``sys.path`` 中加入URL链接。例如：
+
+.. code-block:: python
+
+    >>> # Initial import fails
+    >>> import fib
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+
+    >>> # Install the path hook
+    >>> import urlimport
+    >>> urlimport.install_path_hook()
+
+    >>> # Imports still fail (not on path)
+    >>> import fib
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+
+    >>> # Add an entry to sys.path and watch it work
+    >>> import sys
+    >>> sys.path.append('http://localhost:15000')
+    >>> import fib
+    I'm fib
+    >>> import grok.blah
+    I'm grok.__init__
+    I'm grok.blah
+    >>> grok.blah.__file__
+    'http://localhost:15000/grok/blah.py'
+    >>>
+
+关键点就是 ``handle_url()`` 函数，它被添加到了 ``sys.path_hooks`` 变量中。
+当 ``sys.path`` 的实体被处理时，会调用 ``sys.path_hooks`` 中的函数。
+如果任何一个函数返回了一个查找器对象，那么这个对象就被用来为 ``sys.path`` 实体加载模块。
+
+远程模块加载跟其他的加载使用方法几乎是一样的。例如：
+
+.. code-block:: python
+
+    >>> fib
+    <urlmodule 'fib' from 'http://localhost:15000/fib.py'>
+    >>> fib.__name__
+    'fib'
+    >>> fib.__file__
+    'http://localhost:15000/fib.py'
+    >>> import inspect
+    >>> print(inspect.getsource(fib))
+    # fib.py
+    print("I'm fib")
+
+    def fib(n):
+        if n < 2:
+            return 1
+        else:
+            return fib(n-1) + fib(n-2)
+    >>>
+
+----------
+讨论
+----------
+在详细讨论之前，有点要强调的是，Python的模块、包和导入机制是整个语言中最复杂的部分，
+即使经验丰富的Python程序员也很少能精通它们。
+我在这里推荐一些值的去读的文档和书籍，包括
+`importlib module <https://docs.python.org/3/library/importlib.html>`_
+和 `PEP 302 <http://www.python.org/dev/peps/pep-0302>`_.
+文档内容在这里不会被重复提到，不过我在这里会讨论一些最重要的部分。
+
+首先，如果你想创建一个新的模块对象，使用 ``imp.new_module()`` 函数：
+
+.. code-block:: python
+
+    >>> import imp
+    >>> m = imp.new_module('spam')
+    >>> m
+    <module 'spam'>
+    >>> m.__name__
+    'spam'
+    >>>
+
+模块对象通常有一些期望属性，包括 ``__file__`` （运行模块加载语句的文件名）
+和 ``__package__`` (包名)。
+
+其次，模块会被解释器缓存起来。模块缓存可以在字典 ``sys.modules`` 中被找到。
+因为有了这个缓存机制，通常可以将缓存和模块的创建通过一个步骤完成：
+
+.. code-block:: python
+
+    >>> import sys
+    >>> import imp
+    >>> m = sys.modules.setdefault('spam', imp.new_module('spam'))
+    >>> m
+    <module 'spam'>
+    >>>
+
+如果给定模块已经存在那么就会直接获得已经被创建过的模块，例如：
+
+.. code-block:: python
+
+    >>> import math
+    >>> m = sys.modules.setdefault('math', imp.new_module('math'))
+    >>> m
+    <module 'math' from '/usr/local/lib/python3.3/lib-dynload/math.so'>
+    >>> m.sin(2)
+    0.9092974268256817
+    >>> m.cos(2)
+    -0.4161468365471424
+    >>>
+
+由于创建模块很简单，很容易编写简单函数比如第一部分的 ``load_module()`` 函数。
+这个方案的一个缺点是很难处理复杂情况比如包的导入。
+为了处理一个包，你要重新实现普通import语句的底层逻辑（比如检查目录，查找__init__.py文件，
+执行那些文件，设置路径等）。这个复杂性就是为什么最好直接扩展import语句而不是自定义函数的一个原因。
+
+扩展import语句很简单，但是会有很多移动操作。
+最高层上，导入操作被一个位于sys.meta_path列表中的“元路径”查找器处理。
+如果你输出它的值，会看到下面这样：
+
+.. code-block:: python
+
+    >>> from pprint import pprint
+    >>> pprint(sys.meta_path)
+    [<class '_frozen_importlib.BuiltinImporter'>,
+    <class '_frozen_importlib.FrozenImporter'>,
+    <class '_frozen_importlib.PathFinder'>]
+    >>>
+
+当执行一个语句比如 ``import fib`` 时，解释器会遍历sys.mata_path中的查找器对象，
+调用它们的 ``find_module()`` 方法定位正确的模块加载器。
+可以通过实验来看看：
+
+.. code-block:: python
+
+    >>> class Finder:
+    ...     def find_module(self, fullname, path):
+    ...         print('Looking for', fullname, path)
+    ...         return None
+    ...
+    >>> import sys
+    >>> sys.meta_path.insert(0, Finder()) # Insert as first entry
+    >>> import math
+    Looking for math None
+    >>> import types
+    Looking for types None
+    >>> import threading
+    Looking for threading None
+    Looking for time None
+    Looking for traceback None
+    Looking for linecache None
+    Looking for tokenize None
+    Looking for token None
+    >>>
+
+注意看 ``find_module()`` 方法是怎样在每一个导入就被触发的。
+这个方法中的path参数的作用是处理包。
+多个包被导入，就是一个可在包的 ``__path__`` 属性中找到的路径列表。
+要找到包的子组件就要检查这些路径。
+比如注意对于 ``xml.etree`` 和 ``xml.etree.ElementTree`` 的路径配置：
+
+.. code-block:: python
+
+    >>> import xml.etree.ElementTree
+    Looking for xml None
+    Looking for xml.etree ['/usr/local/lib/python3.3/xml']
+    Looking for xml.etree.ElementTree ['/usr/local/lib/python3.3/xml/etree']
+    Looking for warnings None
+    Looking for contextlib None
+    Looking for xml.etree.ElementPath ['/usr/local/lib/python3.3/xml/etree']
+    Looking for _elementtree None
+    Looking for copy None
+    Looking for org None
+    Looking for pyexpat None
+    Looking for ElementC14N None
+    >>>
+
+在 ``sys.meta_path`` 上查找器的位置很重要，将它从队头移到队尾，然后再试试导入看：
+
+.. code-block:: python
+
+    >>> del sys.meta_path[0]
+    >>> sys.meta_path.append(Finder())
+    >>> import urllib.request
+    >>> import datetime
+
+现在你看不到任何输出了，因为导入被sys.meta_path中的其他实体处理。
+这时候，你只有在导入不存在模块的时候才能看到它被触发：
+
+.. code-block:: python
+
+    >>> import fib
+    Looking for fib None
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+    >>> import xml.superfast
+    Looking for xml.superfast ['/usr/local/lib/python3.3/xml']
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    ImportError: No module named 'xml.superfast'
+    >>>
+
+你之前安装过一个捕获未知模块的查找器，这个是 ``UrlMetaFinder`` 类的关键。
+一个 ``UrlMetaFinder`` 实例被添加到 ``sys.meta_path`` 的末尾，作为最后一个查找器方案。
+如果被请求的模块名不能定位，就会被这个查找器处理掉。
+处理包的时候需要注意，在path参数中指定的值需要被检查，看它是否以查找器中注册的URL开头。
+如果不是，该子模块必须归属于其他查找器并被忽略掉。
+
+对于包的其他处理可在 ``UrlPackageLoader`` 类中被找到。
+这个类不会导入包名，而是去加载对应的 ``__init__.py`` 文件。
+它也会设置模块的 ``__path__`` 属性，这一步很重要，
+因为在加载包的子模块时这个值会被传给后面的 ``find_module()`` 调用。
+基于路径的导入钩子是这些思想的一个扩展，但是采用了另外的方法。
+我们都知道，``sys.path`` 是一个Python查找模块的目录列表，例如：
+
+
+.. code-block:: python
+
+    >>> from pprint import pprint
+    >>> import sys
+    >>> pprint(sys.path)
+    ['',
+    '/usr/local/lib/python33.zip',
+    '/usr/local/lib/python3.3',
+    '/usr/local/lib/python3.3/plat-darwin',
+    '/usr/local/lib/python3.3/lib-dynload',
+    '/usr/local/lib/...3.3/site-packages']
+    >>>
+
+在 ``sys.path`` 中的每一个实体都会被额外的绑定到一个查找器对象上。
+你可以通过查看 ``sys.path_importer_cache`` 去看下这些查找器：
+
+.. code-block:: python
+
+    >>> pprint(sys.path_importer_cache)
+    {'.': FileFinder('.'),
+    '/usr/local/lib/python3.3': FileFinder('/usr/local/lib/python3.3'),
+    '/usr/local/lib/python3.3/': FileFinder('/usr/local/lib/python3.3/'),
+    '/usr/local/lib/python3.3/collections': FileFinder('...python3.3/collections'),
+    '/usr/local/lib/python3.3/encodings': FileFinder('...python3.3/encodings'),
+    '/usr/local/lib/python3.3/lib-dynload': FileFinder('...python3.3/lib-dynload'),
+    '/usr/local/lib/python3.3/plat-darwin': FileFinder('...python3.3/plat-darwin'),
+    '/usr/local/lib/python3.3/site-packages': FileFinder('...python3.3/site-packages'),
+    '/usr/local/lib/python33.zip': None}
+    >>>
+
+``sys.path_importer_cache`` 比 ``sys.path`` 会更大点，
+因为它会为所有被加载代码的目录记录它们的查找器。
+这包括包的子目录，这些通常在 ``sys.path`` 中是不存在的。
+
+要执行 ``import fib`` ，会顺序检查 ``sys.path`` 中的目录。
+对于每个目录，名称“fib”会被传给相应的 ``sys.path_importer_cache`` 中的查找器。
+这个可以让你创建自己的查找器并在缓存中放入一个实体。试试这个：
+
+.. code-block:: python
+
+    >>> class Finder:
+    ... def find_loader(self, name):
+    ...     print('Looking for', name)
+    ...     return (None, [])
+    ...
+    >>> import sys
+    >>> # Add a "debug" entry to the importer cache
+    >>> sys.path_importer_cache['debug'] = Finder()
+    >>> # Add a "debug" directory to sys.path
+    >>> sys.path.insert(0, 'debug')
+    >>> import threading
+    Looking for threading
+    Looking for time
+    Looking for traceback
+    Looking for linecache
+    Looking for tokenize
+    Looking for token
+    >>>
+
+在这里，你可以为名字“debug”创建一个新的缓存实体并将它设置成 ``sys.path`` 上的第一个。
+在所有接下来的导入中，你会看到你的查找器被触发了。
+不过，由于它返回 (None, [])，那么处理进程会继续处理下一个实体。
+
+``sys.path_importer_cache`` 的使用被一个存储在 ``sys.path_hooks`` 中的函数列表控制。
+试试下面的例子，它会清除缓存并给 ``sys.path_hooks`` 添加一个新的路径检查函数
+
+.. code-block:: python
+
+    >>> sys.path_importer_cache.clear()
+    >>> def check_path(path):
+    ...     print('Checking', path)
+    ...     raise ImportError()
+    ...
+    >>> sys.path_hooks.insert(0, check_path)
+    >>> import fib
+    Checked debug
+    Checking .
+    Checking /usr/local/lib/python33.zip
+    Checking /usr/local/lib/python3.3
+    Checking /usr/local/lib/python3.3/plat-darwin
+    Checking /usr/local/lib/python3.3/lib-dynload
+    Checking /Users/beazley/.local/lib/python3.3/site-packages
+    Checking /usr/local/lib/python3.3/site-packages
+    Looking for fib
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+    >>>
+
+正如你所见，``check_path()`` 函数被每个 ``sys.path`` 中的实体调用。
+不顾，由于抛出了 ``ImportError`` 异常，
+啥都不会发生了（仅仅将检查转移到sys.path_hooks的下一个函数）。
+
+知道了怎样sys.path是怎样被处理的，你就能构建一个自定义路径检查函数来查找文件名，不然URL。例如：
+
+.. code-block:: python
+
+    >>> def check_url(path):
+    ...     if path.startswith('http://'):
+    ...         return Finder()
+    ...     else:
+    ...         raise ImportError()
+    ...
+    >>> sys.path.append('http://localhost:15000')
+    >>> sys.path_hooks[0] = check_url
+    >>> import fib
+    Looking for fib # Finder output!
+    Traceback (most recent call last):
+        File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+
+    >>> # Notice installation of Finder in sys.path_importer_cache
+    >>> sys.path_importer_cache['http://localhost:15000']
+    <__main__.Finder object at 0x10064c850>
+    >>>
+
+这就是本节最后部分的关键点。事实上，一个用来在sys.path中查找URL的自定义路径检查函数已经构建完毕。
+当它们被碰到的时候，一个新的 ``UrlPathFinder`` 实例被创建并被放入 ``sys.path_importer_cache``.
+之后，所有需要检查 ``sys.path`` 的导入语句都会使用你的自定义查找器。
+
+基于路径导入的包处理稍微有点复杂，并且跟 ``find_loader()`` 方法返回值有关。
+对于简单模块，``find_loader()`` 返回一个元组(loader, None)，
+其中的loader是一个用于导入模块的加载器实例。
+
+对于一个普通的包，``find_loader()`` 返回一个元组(loader, path)，
+其中的loader是一个用于导入包（并执行__init__.py）的加载器实例，
+path是一个会初始化包的 ``__path__`` 属性的目录列表。
+例如，如果基础URL是 http://localhost:15000 并且一个用户执行 ``import grok`` ,
+那么 ``find_loader()`` 返回的path就会是 [ 'http://localhost:15000/grok' ]
+
+``find_loader()`` 还要能处理一个命名空间包。
+一个命名空间包中有一个合法的包目录名，但是不存在__init__.py文件。
+这样的话，``find_loader()`` 必须返回一个元组(None, path)，
+path是一个目录列表，由它来构建包的定义有__init__.py文件的__path__属性。
+对于这种情况，导入机制会继续前行去检查sys.path中的目录。
+如果找到了命名空间包，所有的结果路径被加到一起来构建最终的命名空间包。
+关于命名空间包的更多信息请参考10.5小节。
+
+所有的包都包含了一个内部路径设置，可以在__path__属性中看到，例如：
+
+.. code-block:: python
+
+    >>> import xml.etree.ElementTree
+    >>> xml.__path__
+    ['/usr/local/lib/python3.3/xml']
+    >>> xml.etree.__path__
+    ['/usr/local/lib/python3.3/xml/etree']
+    >>>
+
+之前提到，__path__的设置是通过 ``find_loader()`` 方法返回值控制的。
+不过，__path__接下来也被sys.path_hooks中的函数处理。
+因此，但包的子组件被加载后，位于__path__中的实体会被 ``handle_url()`` 函数检查。
+这会导致新的 ``UrlPathFinder`` 实例被创建并且被加入到 ``sys.path_importer_cache`` 中。
+
+还有个难点就是 ``handle_url()`` 函数以及它跟内部使用的 ``_get_links()`` 函数之间的交互。
+如果你的查找器实现需要使用到其他模块（比如urllib.request），
+有可能这些模块会在查找器操作期间进行更多的导入。
+它可以导致 ``handle_url()`` 和其他查找器部分陷入一种递归循环状态。
+为了解释这种可能性，实现中有一个被创建的查找器缓存（每一个URL一个）。
+它可以避免创建重复查找器的问题。
+另外，下面的代码片段可以确保查找器不会在初始化链接集合的时候响应任何导入请求：
+
+.. code-block:: python
+
+    # Check link cache
+    if self._links is None:
+        self._links = [] # See discussion
+        self._links = _get_links(self._baseurl)
+
+最后，查找器的 ``invalidate_caches()`` 方法是一个工具方法，用来清理内部缓存。
+这个方法再用户调用 ``importlib.invalidate_caches()`` 的时候被触发。
+如果你想让URL导入者重新读取链接列表的话可以使用它。
+
+对比下两种方案（修改sys.meta_path或使用一个路径钩子）。
+使用sys.meta_path的导入者可以按照自己的需要自由处理模块。
+例如，它们可以从数据库中导入或以不同于一般模块/包处理方式导入。
+这种自由同样意味着导入者需要自己进行内部的一些管理。
+另外，基于路径的钩子只是适用于对sys.path的处理。
+通过这种扩展加载的模块跟普通方式加载的特性是一样的。
+
+如果到现在为止你还是不是很明白，那么可以通过增加一些日志打印来测试下本节。像下面这样：
+
+.. code-block:: python
+
+    >>> import logging
+    >>> logging.basicConfig(level=logging.DEBUG)
+    >>> import urlimport
+    >>> urlimport.install_path_hook()
+    DEBUG:urlimport:Installing handle_url
+    >>> import fib
+    DEBUG:urlimport:Handle path? /usr/local/lib/python33.zip. [No]
+    Traceback (most recent call last):
+    File "<stdin>", line 1, in <module>
+    ImportError: No module named 'fib'
+    >>> import sys
+    >>> sys.path.append('http://localhost:15000')
+    >>> import fib
+    DEBUG:urlimport:Handle path? http://localhost:15000. [Yes]
+    DEBUG:urlimport:Getting links from http://localhost:15000
+    DEBUG:urlimport:links: {'spam.py', 'fib.py', 'grok'}
+    DEBUG:urlimport:find_loader: 'fib'
+    DEBUG:urlimport:find_loader: module 'fib' found
+    DEBUG:urlimport:loader: reading 'http://localhost:15000/fib.py'
+    DEBUG:urlimport:loader: 'http://localhost:15000/fib.py' loaded
+    I'm fib
+    >>>
+
+最后，建议你花点时间看看 `PEP 302 <http://www.python.org/dev/peps/pep-0302>`_
+以及importlib的文档。
+================================
+10.12 导入模块的同时修改模块
+================================
+
+----------
+问题
+----------
+你想给某个已存在模块中的函数添加装饰器。
+不过，前提是这个模块已经被导入并且被使用过。
+
+----------
+解决方案
+----------
+这里问题的本质就是你想在模块被加载时执行某个动作。
+可能是你想在一个模块被加载时触发某个回调函数来通知你。
+
+这个问题可以使用10.11小节中同样的导入钩子机制来实现。下面是一个可能的方案：
+
+.. code-block:: python
+
+    # postimport.py
+    import importlib
+    import sys
+    from collections import defaultdict
+
+    _post_import_hooks = defaultdict(list)
+
+    class PostImportFinder:
+        def __init__(self):
+            self._skip = set()
+
+        def find_module(self, fullname, path=None):
+            if fullname in self._skip:
+                return None
+            self._skip.add(fullname)
+            return PostImportLoader(self)
+
+    class PostImportLoader:
+        def __init__(self, finder):
+            self._finder = finder
+
+        def load_module(self, fullname):
+            importlib.import_module(fullname)
+            module = sys.modules[fullname]
+            for func in _post_import_hooks[fullname]:
+                func(module)
+            self._finder._skip.remove(fullname)
+            return module
+
+    def when_imported(fullname):
+        def decorate(func):
+            if fullname in sys.modules:
+                func(sys.modules[fullname])
+            else:
+                _post_import_hooks[fullname].append(func)
+            return func
+        return decorate
+
+    sys.meta_path.insert(0, PostImportFinder())
+
+这样，你就可以使用 ``when_imported()`` 装饰器了，例如：
+
+.. code-block:: python
+
+    >>> from postimport import when_imported
+    >>> @when_imported('threading')
+    ... def warn_threads(mod):
+    ...     print('Threads? Are you crazy?')
+    ...
+    >>>
+    >>> import threading
+    Threads? Are you crazy?
+    >>>
+
+作为一个更实际的例子，你可能想在已存在的定义上面添加装饰器，如下所示：
+
+.. code-block:: python
+
+    from functools import wraps
+    from postimport import when_imported
+
+    def logged(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            print('Calling', func.__name__, args, kwargs)
+            return func(*args, **kwargs)
+        return wrapper
+
+    # Example
+    @when_imported('math')
+    def add_logging(mod):
+        mod.cos = logged(mod.cos)
+        mod.sin = logged(mod.sin)
+
+----------
+讨论
+----------
+本节技术依赖于10.11小节中讲述过的导入钩子，并稍作修改。
+
+``@when_imported`` 装饰器的作用是注册在导入时被激活的处理器函数。
+该装饰器检查sys.modules来查看模块是否真的已经被加载了。
+如果是的话，该处理器被立即调用。不然，处理器被添加到 ``_post_import_hooks`` 字典中的一个列表中去。
+``_post_import_hooks`` 的作用就是收集所有的为每个模块注册的处理器对象。
+一个模块可以注册多个处理器。
+
+要让模块导入后触发添加的动作，``PostImportFinder`` 类被设置为sys.meta_path第一个元素。
+它会捕获所有模块导入操作。
+
+本节中的 ``PostImportFinder`` 的作用并不是加载模块，而是自带导入完成后触发相应的动作。
+实际的导入被委派给位于sys.meta_path中的其他查找器。
+``PostImportLoader`` 类中的 ``imp.import_module()`` 函数被递归的调用。
+为了避免陷入无线循环，``PostImportFinder`` 保持了一个所有被加载过的模块集合。
+如果一个模块名存在就会直接被忽略掉。
+
+当一个模块被 ``imp.import_module()`` 加载后，
+所有在_post_import_hooks被注册的处理器被调用，使用新加载模块作为一个参数。
+
+有一点需要注意的是本机不适用于那些通过 ``imp.reload()`` 被显式加载的模块。
+也就是说，如果你加载一个之前已被加载过的模块，那么导入处理器将不会再被触发。
+另外，要是你从sys.modules中删除模块然后再重新导入，处理器又会再一次触发。
+
+更多关于导入后钩子信息请参考 `PEP 369 <https://www.python.org/dev/peps/pep-0369>`_.
+
+
+================================
+10.13 安装私有的包
+================================
+
+----------
+问题
+----------
+你想要安装一个第三方包，但是没有权限将它安装到系统Python库中去。
+或者，你可能想要安装一个供自己使用的包，而不是系统上面所有用户。
+
+----------
+解决方案
+----------
+Python有一个用户安装目录，通常类似"~/.local/lib/python3.3/site-packages"。
+要强制在这个目录中安装包，可使用安装选项“--user”。例如：
+
+.. code-block:: python
+
+    python3 setup.py install --user
+
+或者
+
+.. code-block:: python
+
+    pip install --user packagename
+
+在sys.path中用户的“site-packages”目录位于系统的“site-packages”目录之前。
+因此，你安装在里面的包就比系统已安装的包优先级高
+（尽管并不总是这样，要取决于第三方包管理器，比如distribute或pip）。
+
+
+----------
+讨论
+----------
+通常包会被安装到系统的site-packages目录中去，路径类似“/usr/local/lib/python3.3/site-packages”。
+不过，这样做需要有管理员权限并且使用sudo命令。
+就算你有这样的权限去执行命令，使用sudo去安装一个新的，可能没有被验证过的包有时候也不安全。
+
+安装包到用户目录中通常是一个有效的方案，它允许你创建一个自定义安装。
+
+另外，你还可以创建一个虚拟环境，这个我们在下一节会讲到。
+================================
+10.14 创建新的Python环境
+================================
+
+----------
+问题
+----------
+你想创建一个新的Python环境，用来安装模块和包。
+不过，你不想安装一个新的Python克隆，也不想对系统Python环境产生影响。
+
+----------
+解决方案
+----------
+你可以使用 ``pyvenv`` 命令创建一个新的“虚拟”环境。
+这个命令被安装在Python解释器同一目录，或Windows上面的Scripts目录中。下面是一个例子：
+
+.. code-block:: python
+
+    bash % pyvenv Spam
+    bash %
+
+传给 ``pyvenv`` 命令的名字是将要被创建的目录名。当被创建后，Span目录像下面这样：
+
+.. code-block:: python
+
+    bash % cd Spam
+    bash % ls
+    bin include lib pyvenv.cfg
+    bash %
+
+在bin目录中，你会找到一个可以使用的Python解释器：
+
+.. code-block:: python
+
+    bash % Spam/bin/python3
+    Python 3.3.0 (default, Oct 6 2012, 15:45:22)
+    [GCC 4.2.1 (Apple Inc. build 5666) (dot 3)] on darwin
+    Type "help", "copyright", "credits" or "license" for more information.
+    >>> from pprint import pprint
+    >>> import sys
+    >>> pprint(sys.path)
+    ['',
+    '/usr/local/lib/python33.zip',
+    '/usr/local/lib/python3.3',
+    '/usr/local/lib/python3.3/plat-darwin',
+    '/usr/local/lib/python3.3/lib-dynload',
+    '/Users/beazley/Spam/lib/python3.3/site-packages']
+    >>>
+
+这个解释器的特点就是他的site-packages目录被设置为新创建的环境。
+如果你要安装第三方包，它们会被安装在那里，而不是通常系统的site-packages目录。
+
+----------
+讨论
+----------
+创建虚拟环境通常是为了安装和管理第三方包。
+正如你在例子中看到的那样，``sys.path`` 变量包含来自于系统Python的目录，
+而 site-packages目录已经被重定位到一个新的目录。
+
+有了一个新的虚拟环境，下一步就是安装一个包管理器，比如distribute或pip。
+但安装这样的工具和包的时候，你需要确保你使用的是虚拟环境的解释器。
+它会将包安装到新创建的site-packages目录中去。
+
+尽管一个虚拟环境看上去是Python安装的一个复制，
+不过它实际上只包含了少量几个文件和一些符号链接。
+所有标准库函文件和可执行解释器都来自原来的Python安装。
+因此，创建这样的环境是很容易的，并且几乎不会消耗机器资源。
+
+默认情况下，虚拟环境是空的，不包含任何额外的第三方库。如果你想将一个已经安装的包作为虚拟环境的一部分，
+可以使用“--system-site-packages”选项来创建虚拟环境，例如：
+
+.. code-block:: python
+
+    bash % pyvenv --system-site-packages Spam
+    bash %
+
+跟多关于 ``pyvenv`` 和虚拟环境的信息可以参考
+`PEP 405 <https://www.python.org/dev/peps/pep-0405/>`_.
+================================
+10.15 分发包
+================================
+
+----------
+问题
+----------
+你已经编写了一个有用的库，想将它分享给其他人。
+
+----------
+解决方案
+----------
+如果你想分发你的代码，第一件事就是给它一个唯一的名字，并且清理它的目录结构。
+例如，一个典型的函数库包会类似下面这样：
+
+.. code-block:: python
+
+    projectname/
+        README.txt
+        Doc/
+            documentation.txt
+        projectname/
+            __init__.py
+            foo.py
+            bar.py
+            utils/
+                __init__.py
+                spam.py
+                grok.py
+        examples/
+            helloworld.py
+            ...
+
+要让你的包可以发布出去，首先你要编写一个 ``setup.py`` ，类似下面这样：
+
+.. code-block:: python
+
+    # setup.py
+    from distutils.core import setup
+
+    setup(name='projectname',
+        version='1.0',
+        author='Your Name',
+        author_email='you@youraddress.com',
+        url='http://www.you.com/projectname',
+        packages=['projectname', 'projectname.utils'],
+    )
+
+下一步，就是创建一个 ``MANIFEST.in`` 文件，列出所有在你的包中需要包含进来的非源码文件：
+
+.. code-block:: python
+
+    # MANIFEST.in
+    include *.txt
+    recursive-include examples *
+    recursive-include Doc *
+
+确保 ``setup.py`` 和 ``MANIFEST.in`` 文件放在你的包的最顶级目录中。
+一旦你已经做了这些，你就可以像下面这样执行命令来创建一个源码分发包了：
+
+.. code-block:: python
+
+    % bash python3 setup.py sdist
+
+它会创建一个文件比如"projectname-1.0.zip" 或 “projectname-1.0.tar.gz”,
+具体依赖于你的系统平台。如果一切正常，
+这个文件就可以发送给别人使用或者上传至 `Python Package Index <http://pypi.python.org/>`_.
+
+----------
+讨论
+----------
+对于纯Python代码，编写一个普通的 ``setup.py`` 文件通常很简单。
+一个可能的问题是你必须手动列出所有构成包源码的子目录。
+一个常见错误就是仅仅只列出一个包的最顶级目录，忘记了包含包的子组件。
+这也是为什么在 ``setup.py`` 中对于包的说明包含了列表
+``packages=['projectname', 'projectname.utils']``
+
+大部分Python程序员都知道，有很多第三方包管理器供选择，包括setuptools、distribute等等。
+有些是为了替代标准库中的distutils。注意如果你依赖这些包，
+用户可能不能安装你的软件，除非他们已经事先安装过所需要的包管理器。
+正因如此，你更应该时刻记住越简单越好的道理。
+最好让你的代码使用标准的Python 3安装。
+如果其他包也需要的话，可以通过一个可选项来支持。
+
+对于涉及到C扩展的代码打包与分发就更复杂点了。
+第15章对关于C扩展的这方面知识有一些详细讲解，特别是在15.2小节中。
+============================
+11.1 作为客户端与HTTP服务交互
+============================
+
+----------
+问题
+----------
+你需要通过HTTP协议以客户端的方式访问多种服务。例如，下载数据或者与基于REST的API进行交互。
+
+----------
+解决方案
+----------
+对于简单的事情来说，通常使用 ``urllib.request`` 模块就够了。例如，发送一个简单的HTTP GET请求到远程的服务上，可以这样做：
+
+.. code-block:: python
+
+    from urllib import request, parse
+
+    # Base URL being accessed
+    url = 'http://httpbin.org/get'
+
+    # Dictionary of query parameters (if any)
+    parms = {
+       'name1' : 'value1',
+       'name2' : 'value2'
+    }
+
+    # Encode the query string
+    querystring = parse.urlencode(parms)
+
+    # Make a GET request and read the response
+    u = request.urlopen(url+'?' + querystring)
+    resp = u.read()
+
+如果你需要使用POST方法在请求主体中发送查询参数，可以将参数编码后作为可选参数提供给 ``urlopen()`` 函数，就像这样：
+
+.. code-block:: python
+
+    from urllib import request, parse
+
+    # Base URL being accessed
+    url = 'http://httpbin.org/post'
+
+    # Dictionary of query parameters (if any)
+    parms = {
+       'name1' : 'value1',
+       'name2' : 'value2'
+    }
+
+    # Encode the query string
+    querystring = parse.urlencode(parms)
+
+    # Make a POST request and read the response
+    u = request.urlopen(url, querystring.encode('ascii'))
+    resp = u.read()
+
+如果你需要在发出的请求中提供一些自定义的HTTP头，例如修改 ``user-agent`` 字段,可以创建一个包含字段值的字典，并创建一个Request实例然后将其传给 ``urlopen()`` ，如下：
+
+.. code-block:: python
+
+    from urllib import request, parse
+    ...
+
+    # Extra headers
+    headers = {
+        'User-agent' : 'none/ofyourbusiness',
+        'Spam' : 'Eggs'
+    }
+
+    req = request.Request(url, querystring.encode('ascii'), headers=headers)
+
+    # Make a request and read the response
+    u = request.urlopen(req)
+    resp = u.read()
+
+如果需要交互的服务比上面的例子都要复杂，也许应该去看看 requests 库（https://pypi.python.org/pypi/requests）。例如，下面这个示例采用requests库重新实现了上面的操作：
+
+.. code-block:: python
+
+    import requests
+
+    # Base URL being accessed
+    url = 'http://httpbin.org/post'
+
+    # Dictionary of query parameters (if any)
+    parms = {
+       'name1' : 'value1',
+       'name2' : 'value2'
+    }
+
+    # Extra headers
+    headers = {
+        'User-agent' : 'none/ofyourbusiness',
+        'Spam' : 'Eggs'
+    }
+
+    resp = requests.post(url, data=parms, headers=headers)
+
+    # Decoded text returned by the request
+    text = resp.text
+
+关于requests库，一个值得一提的特性就是它能以多种方式从请求中返回响应结果的内容。从上面的代码来看， ``resp.text`` 带给我们的是以Unicode解码的响应文本。但是，如果去访问 ``resp.content`` ，就会得到原始的二进制数据。另一方面，如果访问 ``resp.json`` ，那么就会得到JSON格式的响应内容。
+
+下面这个示例利用 ``requests`` 库发起一个HEAD请求，并从响应中提取出一些HTTP头数据的字段：
+
+.. code-block:: python
+
+    import requests
+
+    resp = requests.head('http://www.python.org/index.html')
+
+    status = resp.status_code
+    last_modified = resp.headers['last-modified']
+    content_type = resp.headers['content-type']
+    content_length = resp.headers['content-length']
+
+下面是一个利用requests通过基本认证登录Pypi的例子：
+
+.. code-block:: python
+
+    import requests
+
+    resp = requests.get('http://pypi.python.org/pypi?:action=login',
+                        auth=('user','password'))
+
+下面是一个利用requests将HTTP cookies从一个请求传递到另一个的例子：
+
+.. code-block:: python
+
+    import requests
+
+    # First request
+    resp1 = requests.get(url)
+    ...
+
+    # Second requests with cookies received on first requests
+    resp2 = requests.get(url, cookies=resp1.cookies)
+
+最后但并非最不重要的一个例子是用requests上传内容：
+
+.. code-block:: python
+
+    import requests
+    url = 'http://httpbin.org/post'
+    files = { 'file': ('data.csv', open('data.csv', 'rb')) }
+
+    r = requests.post(url, files=files)
+
+
+----------
+讨论
+----------
+对于真的很简单HTTP客户端代码，用内置的 ``urllib`` 模块通常就足够了。但是，如果你要做的不仅仅只是简单的GET或POST请求，那就真的不能再依赖它的功能了。这时候就是第三方模块比如 ``requests`` 大显身手的时候了。
+
+例如，如果你决定坚持使用标准的程序库而不考虑像 ``requests`` 这样的第三方库，那么也许就不得不使用底层的 ``http.client`` 模块来实现自己的代码。比方说，下面的代码展示了如何执行一个HEAD请求：
+
+.. code-block:: python
+
+    from http.client import HTTPConnection
+    from urllib import parse
+
+    c = HTTPConnection('www.python.org', 80)
+    c.request('HEAD', '/index.html')
+    resp = c.getresponse()
+
+    print('Status', resp.status)
+    for name, value in resp.getheaders():
+        print(name, value)
+
+
+同样地，如果必须编写涉及代理、认证、cookies以及其他一些细节方面的代码，那么使用 ``urllib`` 就显得特别别扭和啰嗦。比方说，下面这个示例实现在Python包索引上的认证：
+
+.. code-block:: python
+
+    import urllib.request
+
+    auth = urllib.request.HTTPBasicAuthHandler()
+    auth.add_password('pypi','http://pypi.python.org','username','password')
+    opener = urllib.request.build_opener(auth)
+
+    r = urllib.request.Request('http://pypi.python.org/pypi?:action=login')
+    u = opener.open(r)
+    resp = u.read()
+
+    # From here. You can access more pages using opener
+    ...
+
+坦白说，所有的这些操作在 ``requests`` 库中都变得简单的多。
+
+在开发过程中测试HTTP客户端代码常常是很令人沮丧的，因为所有棘手的细节问题都需要考虑（例如cookies、认证、HTTP头、编码方式等）。要完成这些任务，考虑使用httpbin服务（http://httpbin.org）。这个站点会接收发出的请求，然后以JSON的形式将相应信息回传回来。下面是一个交互式的例子：
+
+.. code-block:: python
+
+    >>> import requests
+    >>> r = requests.get('http://httpbin.org/get?name=Dave&n=37',
+    ...     headers = { 'User-agent': 'goaway/1.0' })
+    >>> resp = r.json
+    >>> resp['headers']
+    {'User-Agent': 'goaway/1.0', 'Content-Length': '', 'Content-Type': '',
+    'Accept-Encoding': 'gzip, deflate, compress', 'Connection':
+    'keep-alive', 'Host': 'httpbin.org', 'Accept': '*/*'}
+    >>> resp['args']
+    {'name': 'Dave', 'n': '37'}
+    >>>
+
+在要同一个真正的站点进行交互前，先在 httpbin.org 这样的网站上做实验常常是可取的办法。尤其是当我们面对3次登录失败就会关闭账户这样的风险时尤为有用（不要尝试自己编写HTTP认证客户端来登录你的银行账户）。
+
+尽管本节没有涉及， ``request`` 库还对许多高级的HTTP客户端协议提供了支持，比如OAuth。 ``requests`` 模块的文档（http://docs.python-requests.org)质量很高（坦白说比在这短短的一节的篇幅中所提供的任何信息都好），可以参考文档以获得更多地信息。
+============================
+11.2 创建TCP服务器
+============================
+
+----------
+问题
+----------
+你想实现一个服务器，通过TCP协议和客户端通信。
+
+----------
+解决方案
+----------
+创建一个TCP服务器的一个简单方法是使用 ``socketserver`` 库。例如，下面是一个简单的应答服务器：
+
+.. code-block:: python
+
+    from socketserver import BaseRequestHandler, TCPServer
+
+    class EchoHandler(BaseRequestHandler):
+        def handle(self):
+            print('Got connection from', self.client_address)
+            while True:
+
+                msg = self.request.recv(8192)
+                if not msg:
+                    break
+                self.request.send(msg)
+
+    if __name__ == '__main__':
+        serv = TCPServer(('', 20000), EchoHandler)
+        serv.serve_forever()
+
+在这段代码中，你定义了一个特殊的处理类，实现了一个 ``handle()`` 方法，用来为客户端连接服务。
+``request`` 属性是客户端socket，``client_address`` 有客户端地址。
+为了测试这个服务器，运行它并打开另外一个Python进程连接这个服务器：
+
+.. code-block:: python
+
+    >>> from socket import socket, AF_INET, SOCK_STREAM
+    >>> s = socket(AF_INET, SOCK_STREAM)
+    >>> s.connect(('localhost', 20000))
+    >>> s.send(b'Hello')
+    5
+    >>> s.recv(8192)
+    b'Hello'
+    >>>
+
+很多时候，可以很容易的定义一个不同的处理器。下面是一个使用 ``StreamRequestHandler``
+基类将一个类文件接口放置在底层socket上的例子：
+
+.. code-block:: python
+
+    from socketserver import StreamRequestHandler, TCPServer
+
+    class EchoHandler(StreamRequestHandler):
+        def handle(self):
+            print('Got connection from', self.client_address)
+            # self.rfile is a file-like object for reading
+            for line in self.rfile:
+                # self.wfile is a file-like object for writing
+                self.wfile.write(line)
+
+    if __name__ == '__main__':
+        serv = TCPServer(('', 20000), EchoHandler)
+        serv.serve_forever()
+
+----------
+讨论
+----------
+``socketserver`` 可以让我们很容易的创建简单的TCP服务器。
+但是，你需要注意的是，默认情况下这种服务器是单线程的，一次只能为一个客户端连接服务。
+如果你想处理多个客户端，可以初始化一个 ``ForkingTCPServer`` 或者是 ``ThreadingTCPServer`` 对象。例如：
+
+.. code-block:: python
+
+    from socketserver import ThreadingTCPServer
+
+
+    if __name__ == '__main__':
+        serv = ThreadingTCPServer(('', 20000), EchoHandler)
+        serv.serve_forever()
+
+使用fork或线程服务器有个潜在问题就是它们会为每个客户端连接创建一个新的进程或线程。
+由于客户端连接数是没有限制的，因此一个恶意的黑客可以同时发送大量的连接让你的服务器奔溃。
+
+如果你担心这个问题，你可以创建一个预先分配大小的工作线程池或进程池。
+你先创建一个普通的非线程服务器，然后在一个线程池中使用 ``serve_forever()`` 方法来启动它们。
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        from threading import Thread
+        NWORKERS = 16
+        serv = TCPServer(('', 20000), EchoHandler)
+        for n in range(NWORKERS):
+            t = Thread(target=serv.serve_forever)
+            t.daemon = True
+            t.start()
+        serv.serve_forever()
+
+一般来讲，一个 ``TCPServer`` 在实例化的时候会绑定并激活相应的 ``socket`` 。
+不过，有时候你想通过设置某些选项去调整底下的 `socket`` ，可以设置参数 ``bind_and_activate=False`` 。如下：
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        serv = TCPServer(('', 20000), EchoHandler, bind_and_activate=False)
+        # Set up various socket options
+        serv.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        # Bind and activate
+        serv.server_bind()
+        serv.server_activate()
+        serv.serve_forever()
+
+上面的 ``socket`` 选项是一个非常普遍的配置项，它允许服务器重新绑定一个之前使用过的端口号。
+由于要被经常使用到，它被放置到类变量中，可以直接在 ``TCPServer`` 上面设置。
+在实例化服务器的时候去设置它的值，如下所示：
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        TCPServer.allow_reuse_address = True
+        serv = TCPServer(('', 20000), EchoHandler)
+        serv.serve_forever()
+
+在上面示例中，我们演示了两种不同的处理器基类（ ``BaseRequestHandler`` 和 ``StreamRequestHandler`` ）。
+``StreamRequestHandler`` 更加灵活点，能通过设置其他的类变量来支持一些新的特性。比如：
+
+.. code-block:: python
+
+    import socket
+
+    class EchoHandler(StreamRequestHandler):
+        # Optional settings (defaults shown)
+        timeout = 5                      # Timeout on all socket operations
+        rbufsize = -1                    # Read buffer size
+        wbufsize = 0                     # Write buffer size
+        disable_nagle_algorithm = False  # Sets TCP_NODELAY socket option
+        def handle(self):
+            print('Got connection from', self.client_address)
+            try:
+                for line in self.rfile:
+                    # self.wfile is a file-like object for writing
+                    self.wfile.write(line)
+            except socket.timeout:
+                print('Timed out!')
+
+最后，还需要注意的是巨大部分Python的高层网络模块（比如HTTP、XML-RPC等）都是建立在 ``socketserver`` 功能之上。
+也就是说，直接使用 ``socket`` 库来实现服务器也并不是很难。
+下面是一个使用 ``socket`` 直接编程实现的一个服务器简单例子：
+
+.. code-block:: python
+
+    from socket import socket, AF_INET, SOCK_STREAM
+
+    def echo_handler(address, client_sock):
+        print('Got connection from {}'.format(address))
+        while True:
+            msg = client_sock.recv(8192)
+            if not msg:
+                break
+            client_sock.sendall(msg)
+        client_sock.close()
+
+    def echo_server(address, backlog=5):
+        sock = socket(AF_INET, SOCK_STREAM)
+        sock.bind(address)
+        sock.listen(backlog)
+        while True:
+            client_sock, client_addr = sock.accept()
+            echo_handler(client_addr, client_sock)
+
+    if __name__ == '__main__':
+        echo_server(('', 20000))
+
+============================
+11.3 创建UDP服务器
+============================
+
+----------
+问题
+----------
+你想实现一个基于UDP协议的服务器来与客户端通信。
+
+----------
+解决方案
+----------
+跟TCP一样，UDP服务器也可以通过使用 ``socketserver`` 库很容易的被创建。
+例如，下面是一个简单的时间服务器：
+
+.. code-block:: python
+
+    from socketserver import BaseRequestHandler, UDPServer
+    import time
+
+    class TimeHandler(BaseRequestHandler):
+        def handle(self):
+            print('Got connection from', self.client_address)
+            # Get message and client socket
+            msg, sock = self.request
+            resp = time.ctime()
+            sock.sendto(resp.encode('ascii'), self.client_address)
+
+    if __name__ == '__main__':
+        serv = UDPServer(('', 20000), TimeHandler)
+        serv.serve_forever()
+
+跟之前一样，你先定义一个实现 ``handle()`` 特殊方法的类，为客户端连接服务。
+这个类的 ``request`` 属性是一个包含了数据报和底层socket对象的元组。``client_address`` 包含了客户端地址。
+
+我们来测试下这个服务器，首先运行它，然后打开另外一个Python进程向服务器发送消息：
+
+.. code-block:: python
+
+    >>> from socket import socket, AF_INET, SOCK_DGRAM
+    >>> s = socket(AF_INET, SOCK_DGRAM)
+    >>> s.sendto(b'', ('localhost', 20000))
+    0
+    >>> s.recvfrom(8192)
+    (b'Wed Aug 15 20:35:08 2012', ('127.0.0.1', 20000))
+    >>>
+
+----------
+讨论
+----------
+一个典型的UDP服务器接收到达的数据报(消息)和客户端地址。如果服务器需要做应答，
+它要给客户端回发一个数据报。对于数据报的传送，
+你应该使用socket的 ``sendto()`` 和 ``recvfrom()`` 方法。
+尽管传统的 ``send()`` 和 ``recv()`` 也可以达到同样的效果，
+但是前面的两个方法对于UDP连接而言更普遍。
+
+由于没有底层的连接，UPD服务器相对于TCP服务器来讲实现起来更加简单。
+不过，UDP天生是不可靠的（因为通信没有建立连接，消息可能丢失）。
+因此需要由你自己来决定该怎样处理丢失消息的情况。这个已经不在本书讨论范围内了，
+不过通常来说，如果可靠性对于你程序很重要，你需要借助于序列号、重试、超时以及一些其他方法来保证。
+UDP通常被用在那些对于可靠传输要求不是很高的场合。例如，在实时应用如多媒体流以及游戏领域，
+无需返回恢复丢失的数据包（程序只需简单的忽略它并继续向前运行）。
+
+``UDPServer`` 类是单线程的，也就是说一次只能为一个客户端连接服务。
+实际使用中，这个无论是对于UDP还是TCP都不是什么大问题。
+如果你想要并发操作，可以实例化一个 ``ForkingUDPServer`` 或 ``ThreadingUDPServer`` 对象：
+
+.. code-block:: python
+
+    from socketserver import ThreadingUDPServer
+
+       if __name__ == '__main__':
+        serv = ThreadingUDPServer(('',20000), TimeHandler)
+        serv.serve_forever()
+
+直接使用 ``socket`` 来实现一个UDP服务器也不难，下面是一个例子：
+
+.. code-block:: python
+
+    from socket import socket, AF_INET, SOCK_DGRAM
+    import time
+
+    def time_server(address):
+        sock = socket(AF_INET, SOCK_DGRAM)
+        sock.bind(address)
+        while True:
+            msg, addr = sock.recvfrom(8192)
+            print('Got message from', addr)
+            resp = time.ctime()
+            sock.sendto(resp.encode('ascii'), addr)
+
+    if __name__ == '__main__':
+        time_server(('', 20000))
+
+===============================
+11.4 通过CIDR地址生成对应的IP地址集
+===============================
+
+----------
+问题
+----------
+你有一个CIDR网络地址比如“123.45.67.89/27”，你想将其转换成它所代表的所有IP
+（比如，“123.45.67.64”, “123.45.67.65”, …, “123.45.67.95”)）
+
+----------
+解决方案
+----------
+可以使用 ``ipaddress`` 模块很容易的实现这样的计算。例如：
+
+.. code-block:: python
+
+    >>> import ipaddress
+    >>> net = ipaddress.ip_network('123.45.67.64/27')
+    >>> net
+    IPv4Network('123.45.67.64/27')
+    >>> for a in net:
+    ...     print(a)
+    ...
+    123.45.67.64
+    123.45.67.65
+    123.45.67.66
+    123.45.67.67
+    123.45.67.68
+    ...
+    123.45.67.95
+    >>>
+
+    >>> net6 = ipaddress.ip_network('12:3456:78:90ab:cd:ef01:23:30/125')
+    >>> net6
+    IPv6Network('12:3456:78:90ab:cd:ef01:23:30/125')
+    >>> for a in net6:
+    ...     print(a)
+    ...
+    12:3456:78:90ab:cd:ef01:23:30
+    12:3456:78:90ab:cd:ef01:23:31
+    12:3456:78:90ab:cd:ef01:23:32
+    12:3456:78:90ab:cd:ef01:23:33
+    12:3456:78:90ab:cd:ef01:23:34
+    12:3456:78:90ab:cd:ef01:23:35
+    12:3456:78:90ab:cd:ef01:23:36
+    12:3456:78:90ab:cd:ef01:23:37
+    >>>
+
+``Network`` 也允许像数组一样的索引取值，例如：
+
+.. code-block:: python
+
+    >>> net.num_addresses
+    32
+    >>> net[0]
+
+    IPv4Address('123.45.67.64')
+    >>> net[1]
+    IPv4Address('123.45.67.65')
+    >>> net[-1]
+    IPv4Address('123.45.67.95')
+    >>> net[-2]
+    IPv4Address('123.45.67.94')
+    >>>
+
+另外，你还可以执行网络成员检查之类的操作：
+
+.. code-block:: python
+
+    >>> a = ipaddress.ip_address('123.45.67.69')
+    >>> a in net
+    True
+    >>> b = ipaddress.ip_address('123.45.67.123')
+    >>> b in net
+    False
+    >>>
+
+一个IP地址和网络地址能通过一个IP接口来指定，例如：
+
+.. code-block:: python
+
+    >>> inet = ipaddress.ip_interface('123.45.67.73/27')
+    >>> inet.network
+    IPv4Network('123.45.67.64/27')
+    >>> inet.ip
+    IPv4Address('123.45.67.73')
+    >>>
+
+----------
+讨论
+----------
+``ipaddress`` 模块有很多类可以表示IP地址、网络和接口。
+当你需要操作网络地址（比如解析、打印、验证等）的时候会很有用。
+
+要注意的是，``ipaddress`` 模块跟其他一些和网络相关的模块比如 ``socket`` 库交集很少。
+所以，你不能使用 ``IPv4Address`` 的实例来代替一个地址字符串，你首先得显式的使用 ``str()`` 转换它。例如：
+
+.. code-block:: python
+
+    >>> a = ipaddress.ip_address('127.0.0.1')
+    >>> from socket import socket, AF_INET, SOCK_STREAM
+    >>> s = socket(AF_INET, SOCK_STREAM)
+    >>> s.connect((a, 8080))
+    Traceback (most recent call last):
+      File "<stdin>", line 1, in <module>
+    TypeError: Can't convert 'IPv4Address' object to str implicitly
+    >>> s.connect((str(a), 8080))
+    >>>
+
+更多相关内容，请参考 `An Introduction to the ipaddress Module <https://docs.python.org/3/howto/ipaddress.html>`_
+===============================
+11.5 创建一个简单的REST接口
+===============================
+
+----------
+问题
+----------
+你想使用一个简单的REST接口通过网络远程控制或访问你的应用程序，但是你又不想自己去安装一个完整的web框架。
+
+----------
+解决方案
+----------
+构建一个REST风格的接口最简单的方法是创建一个基于WSGI标准（PEP 3333）的很小的库，下面是一个例子：
+
+.. code-block:: python
+
+    # resty.py
+
+    import cgi
+
+    def notfound_404(environ, start_response):
+        start_response('404 Not Found', [ ('Content-type', 'text/plain') ])
+        return [b'Not Found']
+
+    class PathDispatcher:
+        def __init__(self):
+            self.pathmap = { }
+
+        def __call__(self, environ, start_response):
+            path = environ['PATH_INFO']
+            params = cgi.FieldStorage(environ['wsgi.input'],
+                                      environ=environ)
+            method = environ['REQUEST_METHOD'].lower()
+            environ['params'] = { key: params.getvalue(key) for key in params }
+            handler = self.pathmap.get((method,path), notfound_404)
+            return handler(environ, start_response)
+
+        def register(self, method, path, function):
+            self.pathmap[method.lower(), path] = function
+            return function
+
+为了使用这个调度器，你只需要编写不同的处理器，就像下面这样：
+
+.. code-block:: python
+
+    import time
+
+    _hello_resp = '''\
+    <html>
+      <head>
+         <title>Hello {name}</title>
+       </head>
+       <body>
+         <h1>Hello {name}!</h1>
+       </body>
+    </html>'''
+
+    def hello_world(environ, start_response):
+        start_response('200 OK', [ ('Content-type','text/html')])
+        params = environ['params']
+        resp = _hello_resp.format(name=params.get('name'))
+        yield resp.encode('utf-8')
+
+    _localtime_resp = '''\
+    <?xml version="1.0"?>
+    <time>
+      <year>{t.tm_year}</year>
+      <month>{t.tm_mon}</month>
+      <day>{t.tm_mday}</day>
+      <hour>{t.tm_hour}</hour>
+      <minute>{t.tm_min}</minute>
+      <second>{t.tm_sec}</second>
+    </time>'''
+
+    def localtime(environ, start_response):
+        start_response('200 OK', [ ('Content-type', 'application/xml') ])
+        resp = _localtime_resp.format(t=time.localtime())
+        yield resp.encode('utf-8')
+
+    if __name__ == '__main__':
+        from resty import PathDispatcher
+        from wsgiref.simple_server import make_server
+
+        # Create the dispatcher and register functions
+        dispatcher = PathDispatcher()
+        dispatcher.register('GET', '/hello', hello_world)
+        dispatcher.register('GET', '/localtime', localtime)
+
+        # Launch a basic server
+        httpd = make_server('', 8080, dispatcher)
+        print('Serving on port 8080...')
+        httpd.serve_forever()
+
+要测试下这个服务器，你可以使用一个浏览器或 ``urllib`` 和它交互。例如：
+
+.. code-block:: python
+
+    >>> u = urlopen('http://localhost:8080/hello?name=Guido')
+    >>> print(u.read().decode('utf-8'))
+    <html>
+      <head>
+         <title>Hello Guido</title>
+       </head>
+       <body>
+         <h1>Hello Guido!</h1>
+       </body>
+    </html>
+
+    >>> u = urlopen('http://localhost:8080/localtime')
+    >>> print(u.read().decode('utf-8'))
+    <?xml version="1.0"?>
+    <time>
+      <year>2012</year>
+      <month>11</month>
+      <day>24</day>
+      <hour>14</hour>
+      <minute>49</minute>
+      <second>17</second>
+    </time>
+    >>>
+
+----------
+讨论
+----------
+在编写REST接口时，通常都是服务于普通的HTTP请求。但是跟那些功能完整的网站相比，你通常只需要处理数据。
+这些数据以各种标准格式编码，比如XML、JSON或CSV。
+尽管程序看上去很简单，但是以这种方式提供的API对于很多应用程序来讲是非常有用的。
+
+例如，长期运行的程序可能会使用一个REST API来实现监控或诊断。
+大数据应用程序可以使用REST来构建一个数据查询或提取系统。
+REST还能用来控制硬件设备比如机器人、传感器、工厂或灯泡。
+更重要的是，REST API已经被大量客户端编程环境所支持，比如Javascript, Android, iOS等。
+因此，利用这种接口可以让你开发出更加复杂的应用程序。
+
+为了实现一个简单的REST接口，你只需让你的程序代码满足Python的WSGI标准即可。
+WSGI被标准库支持，同时也被绝大部分第三方web框架支持。
+因此，如果你的代码遵循这个标准，在后面的使用过程中就会更加的灵活！
+
+在WSGI中，你可以像下面这样约定的方式以一个可调用对象形式来实现你的程序。
+
+.. code-block:: python
+
+    import cgi
+
+    def wsgi_app(environ, start_response):
+        pass
+
+``environ`` 属性是一个字典，包含了从web服务器如Apache[参考Internet RFC 3875]提供的CGI接口中获取的值。
+要将这些不同的值提取出来，你可以像这么这样写：
+
+.. code-block:: python
+
+    def wsgi_app(environ, start_response):
+        method = environ['REQUEST_METHOD']
+        path = environ['PATH_INFO']
+        # Parse the query parameters
+        params = cgi.FieldStorage(environ['wsgi.input'], environ=environ)
+
+我们展示了一些常见的值。``environ['REQUEST_METHOD']`` 代表请求类型如GET、POST、HEAD等。
+``environ['PATH_INFO']`` 表示被请求资源的路径。
+调用 ``cgi.FieldStorage()`` 可以从请求中提取查询参数并将它们放入一个类字典对象中以便后面使用。
+
+``start_response`` 参数是一个为了初始化一个请求对象而必须被调用的函数。
+第一个参数是返回的HTTP状态值，第二个参数是一个(名,值)元组列表，用来构建返回的HTTP头。例如：
+
+.. code-block:: python
+
+    def wsgi_app(environ, start_response):
+        pass
+        start_response('200 OK', [('Content-type', 'text/plain')])
+
+为了返回数据，一个WSGI程序必须返回一个字节字符串序列。可以像下面这样使用一个列表来完成：
+
+.. code-block:: python
+
+    def wsgi_app(environ, start_response):
+        pass
+        start_response('200 OK', [('Content-type', 'text/plain')])
+        resp = []
+        resp.append(b'Hello World\n')
+        resp.append(b'Goodbye!\n')
+        return resp
+
+或者，你还可以使用 ``yield`` ：
+
+.. code-block:: python
+
+    def wsgi_app(environ, start_response):
+        pass
+        start_response('200 OK', [('Content-type', 'text/plain')])
+        yield b'Hello World\n'
+        yield b'Goodbye!\n'
+
+这里要强调的一点是最后返回的必须是字节字符串。如果返回结果包含文本字符串，必须先将其编码成字节。
+当然，并没有要求你返回的一定是文本，你可以很轻松的编写一个生成图片的程序。
+
+尽管WSGI程序通常被定义成一个函数，不过你也可以使用类实例来实现，只要它实现了合适的 ``__call__()`` 方法。例如：
+
+.. code-block:: python
+
+    class WSGIApplication:
+        def __init__(self):
+            ...
+        def __call__(self, environ, start_response)
+           ...
+
+我们已经在上面使用这种技术创建 ``PathDispatcher`` 类。
+这个分发器仅仅只是管理一个字典，将(方法,路径)对映射到处理器函数上面。
+当一个请求到来时，它的方法和路径被提取出来，然后被分发到对应的处理器上面去。
+另外，任何查询变量会被解析后放到一个字典中，以 ``environ['params']`` 形式存储。
+后面这个步骤太常见，所以建议你在分发器里面完成，这样可以省掉很多重复代码。
+使用分发器的时候，你只需简单的创建一个实例，然后通过它注册各种WSGI形式的函数。
+编写这些函数应该超级简单了，只要你遵循 ``start_response()`` 函数的编写规则，并且最后返回字节字符串即可。
+
+当编写这种函数的时候还需注意的一点就是对于字符串模板的使用。
+没人愿意写那种到处混合着 ``print()`` 函数 、XML和大量格式化操作的代码。
+我们上面使用了三引号包含的预先定义好的字符串模板。
+这种方式的可以让我们很容易的在以后修改输出格式(只需要修改模板本身，而不用动任何使用它的地方)。
+
+最后，使用WSGI还有一个很重要的部分就是没有什么地方是针对特定web服务器的。
+因为标准对于服务器和框架是中立的，你可以将你的程序放入任何类型服务器中。
+我们使用下面的代码测试测试本节代码：
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        from wsgiref.simple_server import make_server
+
+        # Create the dispatcher and register functions
+        dispatcher = PathDispatcher()
+        pass
+
+        # Launch a basic server
+        httpd = make_server('', 8080, dispatcher)
+        print('Serving on port 8080...')
+        httpd.serve_forever()
+
+上面代码创建了一个简单的服务器，然后你就可以来测试下你的实现是否能正常工作。
+最后，当你准备进一步扩展你的程序的时候，你可以修改这个代码，让它可以为特定服务器工作。
+
+WSGI本身是一个很小的标准。因此它并没有提供一些高级的特性比如认证、cookies、重定向等。
+这些你自己实现起来也不难。不过如果你想要更多的支持，可以考虑第三方库，比如 ``WebOb`` 或者 ``Paste``
+===============================
+11.6 通过XML-RPC实现简单的远程调用
+===============================
+
+----------
+问题
+----------
+你想找到一个简单的方式去执行运行在远程机器上面的Python程序中的函数或方法。
+
+----------
+解决方案
+----------
+实现一个远程方法调用的最简单方式是使用XML-RPC。下面我们演示一下一个实现了键-值存储功能的简单服务器：
+
+.. code-block:: python
+
+    from xmlrpc.server import SimpleXMLRPCServer
+
+    class KeyValueServer:
+        _rpc_methods_ = ['get', 'set', 'delete', 'exists', 'keys']
+        def __init__(self, address):
+            self._data = {}
+            self._serv = SimpleXMLRPCServer(address, allow_none=True)
+            for name in self._rpc_methods_:
+                self._serv.register_function(getattr(self, name))
+
+        def get(self, name):
+            return self._data[name]
+
+        def set(self, name, value):
+            self._data[name] = value
+
+        def delete(self, name):
+            del self._data[name]
+
+        def exists(self, name):
+            return name in self._data
+
+        def keys(self):
+            return list(self._data)
+
+        def serve_forever(self):
+            self._serv.serve_forever()
+
+    # Example
+    if __name__ == '__main__':
+        kvserv = KeyValueServer(('', 15000))
+        kvserv.serve_forever()
+
+下面我们从一个客户端机器上面来访问服务器：
+
+.. code-block:: python
+
+    >>> from xmlrpc.client import ServerProxy
+    >>> s = ServerProxy('http://localhost:15000', allow_none=True)
+    >>> s.set('foo', 'bar')
+    >>> s.set('spam', [1, 2, 3])
+    >>> s.keys()
+    ['spam', 'foo']
+    >>> s.get('foo')
+    'bar'
+    >>> s.get('spam')
+    [1, 2, 3]
+    >>> s.delete('spam')
+    >>> s.exists('spam')
+    False
+    >>>
+
+----------
+讨论
+----------
+XML-RPC 可以让我们很容易的构造一个简单的远程调用服务。你所需要做的仅仅是创建一个服务器实例，
+通过它的方法 ``register_function()`` 来注册函数，然后使用方法 ``serve_forever()`` 启动它。
+在上面我们将这些步骤放在一起写到一个类中，不够这并不是必须的。比如你还可以像下面这样创建一个服务器：
+
+.. code-block:: python
+
+    from xmlrpc.server import SimpleXMLRPCServer
+    def add(x,y):
+        return x+y
+
+    serv = SimpleXMLRPCServer(('', 15000))
+    serv.register_function(add)
+    serv.serve_forever()
+
+XML-RPC暴露出来的函数只能适用于部分数据类型，比如字符串、整形、列表和字典。
+对于其他类型就得需要做些额外的功课了。
+例如，如果你想通过 XML-RPC 传递一个对象实例，实际上只有他的实例字典被处理：
+
+.. code-block:: python
+
+    >>> class Point:
+    ...     def __init__(self, x, y):
+    ...             self.x = x
+    ...             self.y = y
+    ...
+    >>> p = Point(2, 3)
+    >>> s.set('foo', p)
+    >>> s.get('foo')
+    {'x': 2, 'y': 3}
+    >>>
+
+类似的，对于二进制数据的处理也跟你想象的不太一样：
+
+.. code-block:: python
+
+    >>> s.set('foo', b'Hello World')
+    >>> s.get('foo')
+    <xmlrpc.client.Binary object at 0x10131d410>
+
+    >>> _.data
+    b'Hello World'
+    >>>
+
+一般来讲，你不应该将 XML-RPC 服务以公共API的方式暴露出来。
+对于这种情况，通常分布式应用程序会是一个更好的选择。
+
+XML-RPC的一个缺点是它的性能。``SimpleXMLRPCServer`` 的实现是单线程的，
+所以它不适合于大型程序，尽管我们在11.2小节中演示过它是可以通过多线程来执行的。
+另外，由于 XML-RPC 将所有数据都序列化为XML格式，所以它会比其他的方式运行的慢一些。
+但是它也有优点，这种方式的编码可以被绝大部分其他编程语言支持。
+通过使用这种方式，其他语言的客户端程序都能访问你的服务。
+
+虽然XML-RPC有很多缺点，但是如果你需要快速构建一个简单远程过程调用系统的话，它仍然值得去学习的。
+有时候，简单的方案就已经足够了。
+===============================
+11.7 在不同的Python解释器之间交互
+===============================
+
+----------
+问题
+----------
+你在不同的机器上面运行着多个Python解释器实例，并希望能够在这些解释器之间通过消息来交换数据。
+
+----------
+解决方案
+----------
+通过使用 ``multiprocessing.connection`` 模块可以很容易的实现解释器之间的通信。
+下面是一个简单的应答服务器例子：
+
+.. code-block:: python
+
+    from multiprocessing.connection import Listener
+    import traceback
+
+    def echo_client(conn):
+        try:
+            while True:
+                msg = conn.recv()
+                conn.send(msg)
+        except EOFError:
+            print('Connection closed')
+
+    def echo_server(address, authkey):
+        serv = Listener(address, authkey=authkey)
+        while True:
+            try:
+                client = serv.accept()
+
+                echo_client(client)
+            except Exception:
+                traceback.print_exc()
+
+    echo_server(('', 25000), authkey=b'peekaboo')
+
+然后客户端连接服务器并发送消息的简单示例：
+
+.. code-block:: python
+
+    >>> from multiprocessing.connection import Client
+    >>> c = Client(('localhost', 25000), authkey=b'peekaboo')
+    >>> c.send('hello')
+    >>> c.recv()
+    'hello'
+    >>> c.send(42)
+    >>> c.recv()
+    42
+    >>> c.send([1, 2, 3, 4, 5])
+    >>> c.recv()
+    [1, 2, 3, 4, 5]
+    >>>
+
+跟底层socket不同的是，每个消息会完整保存（每一个通过send()发送的对象能通过recv()来完整接受）。
+另外，所有对象会通过pickle序列化。因此，任何兼容pickle的对象都能在此连接上面被发送和接受。
+
+----------
+讨论
+----------
+目前有很多用来实现各种消息传输的包和函数库，比如ZeroMQ、Celery等。
+你还有另外一种选择就是自己在底层socket基础之上来实现一个消息传输层。
+但是你想要简单一点的方案，那么这时候 ``multiprocessing.connection`` 就派上用场了。
+仅仅使用一些简单的语句即可实现多个解释器之间的消息通信。
+
+如果你的解释器运行在同一台机器上面，那么你可以使用另外的通信机制，比如Unix域套接字或者是Windows命名管道。
+要想使用UNIX域套接字来创建一个连接，只需简单的将地址改写一个文件名即可：
+
+.. code-block:: python
+
+    s = Listener('/tmp/myconn', authkey=b'peekaboo')
+
+要想使用Windows命名管道来创建连接，只需像下面这样使用一个文件名：
+
+.. code-block:: python
+
+    s = Listener(r'\\.\pipe\myconn', authkey=b'peekaboo')
+
+一个通用准则是，你不要使用 ``multiprocessing`` 来实现一个对外的公共服务。
+``Client()`` 和 ``Listener()`` 中的 ``authkey`` 参数用来认证发起连接的终端用户。
+如果密钥不对会产生一个异常。此外，该模块最适合用来建立长连接（而不是大量的短连接），
+例如，两个解释器之间启动后就开始建立连接并在处理某个问题过程中会一直保持连接状态。
+
+如果你需要对底层连接做更多的控制，比如需要支持超时、非阻塞I/O或其他类似的特性，
+你最好使用另外的库或者是在高层socket上来实现这些特性。
+===============================
+11.8 实现远程方法调用
+===============================
+
+----------
+问题
+----------
+你想在一个消息传输层如 ``sockets`` 、``multiprocessing connections`` 或 ``ZeroMQ``
+的基础之上实现一个简单的远程过程调用（RPC）。
+
+----------
+解决方案
+----------
+
+将函数请求、参数和返回值使用pickle编码后，在不同的解释器直接传送pickle字节字符串，可以很容易的实现RPC。
+下面是一个简单的PRC处理器，可以被整合到一个服务器中去：
+
+.. code-block:: python
+
+    # rpcserver.py
+
+    import pickle
+    class RPCHandler:
+        def __init__(self):
+            self._functions = { }
+
+        def register_function(self, func):
+            self._functions[func.__name__] = func
+
+        def handle_connection(self, connection):
+            try:
+                while True:
+                    # Receive a message
+                    func_name, args, kwargs = pickle.loads(connection.recv())
+                    # Run the RPC and send a response
+                    try:
+                        r = self._functions[func_name](*args,**kwargs)
+                        connection.send(pickle.dumps(r))
+                    except Exception as e:
+                        connection.send(pickle.dumps(e))
+            except EOFError:
+                 pass
+
+要使用这个处理器，你需要将它加入到一个消息服务器中。你有很多种选择，
+但是使用 ``multiprocessing`` 库是最简单的。下面是一个RPC服务器例子：
+
+.. code-block:: python
+
+    from multiprocessing.connection import Listener
+    from threading import Thread
+
+    def rpc_server(handler, address, authkey):
+        sock = Listener(address, authkey=authkey)
+        while True:
+            client = sock.accept()
+            t = Thread(target=handler.handle_connection, args=(client,))
+            t.daemon = True
+            t.start()
+
+    # Some remote functions
+    def add(x, y):
+        return x + y
+
+    def sub(x, y):
+        return x - y
+
+    # Register with a handler
+    handler = RPCHandler()
+    handler.register_function(add)
+    handler.register_function(sub)
+
+    # Run the server
+    rpc_server(handler, ('localhost', 17000), authkey=b'peekaboo')
+
+为了从一个远程客户端访问服务器，你需要创建一个对应的用来传送请求的RPC代理类。例如
+
+.. code-block:: python
+
+    import pickle
+
+    class RPCProxy:
+        def __init__(self, connection):
+            self._connection = connection
+        def __getattr__(self, name):
+            def do_rpc(*args, **kwargs):
+                self._connection.send(pickle.dumps((name, args, kwargs)))
+                result = pickle.loads(self._connection.recv())
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            return do_rpc
+
+要使用这个代理类，你需要将其包装到一个服务器的连接上面，例如：
+
+.. code-block:: python
+
+    >>> from multiprocessing.connection import Client
+    >>> c = Client(('localhost', 17000), authkey=b'peekaboo')
+    >>> proxy = RPCProxy(c)
+    >>> proxy.add(2, 3)
+
+    5
+    >>> proxy.sub(2, 3)
+    -1
+    >>> proxy.sub([1, 2], 4)
+    Traceback (most recent call last):
+      File "<stdin>", line 1, in <module>
+      File "rpcserver.py", line 37, in do_rpc
+        raise result
+    TypeError: unsupported operand type(s) for -: 'list' and 'int'
+    >>>
+
+要注意的是很多消息层（比如 ``multiprocessing`` ）已经使用pickle序列化了数据。
+如果是这样的话，对 ``pickle.dumps()`` 和 ``pickle.loads()`` 的调用要去掉。
+
+----------
+讨论
+----------
+``RPCHandler`` 和 ``RPCProxy`` 的基本思路是很比较简单的。
+如果一个客户端想要调用一个远程函数，比如 ``foo(1, 2, z=3)``
+,代理类创建一个包含了函数名和参数的元组 ``('foo', (1, 2), {'z': 3})`` 。
+这个元组被pickle序列化后通过网络连接发生出去。
+这一步在 ``RPCProxy`` 的 ``__getattr__()`` 方法返回的 ``do_rpc()`` 闭包中完成。
+服务器接收后通过pickle反序列化消息，查找函数名看看是否已经注册过，然后执行相应的函数。
+执行结果(或异常)被pickle序列化后返回发送给客户端。我们的实例需要依赖 ``multiprocessing`` 进行通信。
+不过，这种方式可以适用于其他任何消息系统。例如，如果你想在ZeroMQ之上实习RPC，
+仅仅只需要将连接对象换成合适的ZeroMQ的socket对象即可。
+
+由于底层需要依赖pickle，那么安全问题就需要考虑了
+（因为一个聪明的黑客可以创建特定的消息，能够让任意函数通过pickle反序列化后被执行）。
+因此你永远不要允许来自不信任或未认证的客户端的RPC。特别是你绝对不要允许来自Internet的任意机器的访问，
+这种只能在内部被使用，位于防火墙后面并且不要对外暴露。
+
+作为pickle的替代，你也许可以考虑使用JSON、XML或一些其他的编码格式来序列化消息。
+例如，本机实例可以很容易的改写成JSON编码方案。还需要将 ``pickle.loads()`` 和  ``pickle.dumps()``
+替换成 ``json.loads()`` 和 ``json.dumps()`` 即可：
+
+.. code-block:: python
+
+    # jsonrpcserver.py
+    import json
+
+    class RPCHandler:
+        def __init__(self):
+            self._functions = { }
+
+        def register_function(self, func):
+            self._functions[func.__name__] = func
+
+        def handle_connection(self, connection):
+            try:
+                while True:
+                    # Receive a message
+                    func_name, args, kwargs = json.loads(connection.recv())
+                    # Run the RPC and send a response
+                    try:
+                        r = self._functions[func_name](*args,**kwargs)
+                        connection.send(json.dumps(r))
+                    except Exception as e:
+                        connection.send(json.dumps(str(e)))
+            except EOFError:
+                 pass
+
+    # jsonrpcclient.py
+    import json
+
+    class RPCProxy:
+        def __init__(self, connection):
+            self._connection = connection
+        def __getattr__(self, name):
+            def do_rpc(*args, **kwargs):
+                self._connection.send(json.dumps((name, args, kwargs)))
+                result = json.loads(self._connection.recv())
+                return result
+            return do_rpc
+
+实现RPC的一个比较复杂的问题是如何去处理异常。至少，当方法产生异常时服务器不应该奔溃。
+因此，返回给客户端的异常所代表的含义就要好好设计了。
+如果你使用pickle，异常对象实例在客户端能被反序列化并抛出。如果你使用其他的协议，那得想想另外的方法了。
+不过至少，你应该在响应中返回异常字符串。我们在JSON的例子中就是使用的这种方式。
+
+对于其他的RPC实现例子，我推荐你看看在XML-RPC中使用的 ``SimpleXMLRPCServer`` 和 ``ServerProxy`` 的实现，
+也就是11.6小节中的内容。
+===============================
+11.9 简单的客户端认证
+===============================
+
+----------
+问题
+----------
+你想在分布式系统中实现一个简单的客户端连接认证功能，又不想像SSL那样的复杂。
+
+----------
+解决方案
+----------
+可以利用 ``hmac`` 模块实现一个连接握手，从而实现一个简单而高效的认证过程。下面是代码示例：
+
+.. code-block:: python
+
+    import hmac
+    import os
+
+    def client_authenticate(connection, secret_key):
+        '''
+        Authenticate client to a remote service.
+        connection represents a network connection.
+        secret_key is a key known only to both client/server.
+        '''
+        message = connection.recv(32)
+        hash = hmac.new(secret_key, message)
+        digest = hash.digest()
+        connection.send(digest)
+
+    def server_authenticate(connection, secret_key):
+        '''
+        Request client authentication.
+        '''
+        message = os.urandom(32)
+        connection.send(message)
+        hash = hmac.new(secret_key, message)
+        digest = hash.digest()
+        response = connection.recv(len(digest))
+        return hmac.compare_digest(digest,response)
+
+基本原理是当连接建立后，服务器给客户端发送一个随机的字节消息（这里例子中使用了 ``os.urandom()`` 返回值）。
+客户端和服务器同时利用hmac和一个只有双方知道的密钥来计算出一个加密哈希值。然后客户端将它计算出的摘要发送给服务器，
+服务器通过比较这个值和自己计算的是否一致来决定接受或拒绝连接。摘要的比较需要使用 ``hmac.compare_digest()`` 函数。
+使用这个函数可以避免遭到时间分析攻击，不要用简单的比较操作符（==）。
+为了使用这些函数，你需要将它集成到已有的网络或消息代码中。例如，对于sockets，服务器代码应该类似下面：
+
+.. code-block:: python
+
+    from socket import socket, AF_INET, SOCK_STREAM
+
+    secret_key = b'peekaboo'
+    def echo_handler(client_sock):
+        if not server_authenticate(client_sock, secret_key):
+            client_sock.close()
+            return
+        while True:
+
+            msg = client_sock.recv(8192)
+            if not msg:
+                break
+            client_sock.sendall(msg)
+
+    def echo_server(address):
+        s = socket(AF_INET, SOCK_STREAM)
+        s.bind(address)
+        s.listen(5)
+        while True:
+            c,a = s.accept()
+            echo_handler(c)
+
+    echo_server(('', 18000))
+
+    Within a client, you would do this:
+
+    from socket import socket, AF_INET, SOCK_STREAM
+
+    secret_key = b'peekaboo'
+
+    s = socket(AF_INET, SOCK_STREAM)
+    s.connect(('localhost', 18000))
+    client_authenticate(s, secret_key)
+    s.send(b'Hello World')
+    resp = s.recv(1024)
+
+----------
+讨论
+----------
+``hmac`` 认证的一个常见使用场景是内部消息通信系统和进程间通信。
+例如，如果你编写的系统涉及到一个集群中多个处理器之间的通信，
+你可以使用本节方案来确保只有被允许的进程之间才能彼此通信。
+事实上，基于 ``hmac`` 的认证被 ``multiprocessing`` 模块使用来实现子进程直接的通信。
+
+还有一点需要强调的是连接认证和加密是两码事。
+认证成功之后的通信消息是以明文形式发送的，任何人只要想监听这个连接线路都能看到消息（尽管双方的密钥不会被传输）。
+
+hmac认证算法基于哈希函数如MD5和SHA-1，关于这个在IETF RFC 2104中有详细介绍。
+===============================
+11.10 在网络服务中加入SSL
+===============================
+
+----------
+问题
+----------
+你想实现一个基于sockets的网络服务，客户端和服务器通过SSL协议认证并加密传输的数据。
+
+----------
+解决方案
+----------
+``ssl`` 模块能为底层socket连接添加SSL的支持。
+``ssl.wrap_socket()`` 函数接受一个已存在的socket作为参数并使用SSL层来包装它。
+例如，下面是一个简单的应答服务器，能在服务器端为所有客户端连接做认证。
+
+.. code-block:: python
+
+    from socket import socket, AF_INET, SOCK_STREAM
+    import ssl
+
+    KEYFILE = 'server_key.pem'   # Private key of the server
+    CERTFILE = 'server_cert.pem' # Server certificate (given to client)
+
+    def echo_client(s):
+        while True:
+            data = s.recv(8192)
+            if data == b'':
+                break
+            s.send(data)
+        s.close()
+        print('Connection closed')
+
+    def echo_server(address):
+        s = socket(AF_INET, SOCK_STREAM)
+        s.bind(address)
+        s.listen(1)
+
+        # Wrap with an SSL layer requiring client certs
+        s_ssl = ssl.wrap_socket(s,
+                                keyfile=KEYFILE,
+                                certfile=CERTFILE,
+                                server_side=True
+                                )
+        # Wait for connections
+        while True:
+            try:
+                c,a = s_ssl.accept()
+                print('Got connection', c, a)
+                echo_client(c)
+            except Exception as e:
+                print('{}: {}'.format(e.__class__.__name__, e))
+
+    echo_server(('', 20000))
+
+下面我们演示一个客户端连接服务器的交互例子。客户端会请求服务器来认证并确认连接：
+
+.. code-block:: python
+
+    >>> from socket import socket, AF_INET, SOCK_STREAM
+    >>> import ssl
+    >>> s = socket(AF_INET, SOCK_STREAM)
+    >>> s_ssl = ssl.wrap_socket(s,
+                    cert_reqs=ssl.CERT_REQUIRED,
+                    ca_certs = 'server_cert.pem')
+    >>> s_ssl.connect(('localhost', 20000))
+    >>> s_ssl.send(b'Hello World?')
+    12
+    >>> s_ssl.recv(8192)
+    b'Hello World?'
+    >>>
+
+这种直接处理底层socket方式有个问题就是它不能很好的跟标准库中已存在的网络服务兼容。
+例如，绝大部分服务器代码（HTTP、XML-RPC等）实际上是基于 ``socketserver`` 库的。
+客户端代码在一个较高层上实现。我们需要另外一种稍微不同的方式来将SSL添加到已存在的服务中：
+
+首先，对于服务器而言，可以通过像下面这样使用一个mixin类来添加SSL：
+
+.. code-block:: python
+
+        import ssl
+
+        class SSLMixin:
+        '''
+        Mixin class that adds support for SSL to existing servers based
+        on the socketserver module.
+        '''
+        def __init__(self, *args,
+                     keyfile=None, certfile=None, ca_certs=None,
+                     cert_reqs=ssl.CERT_NONE,
+                     **kwargs):
+            self._keyfile = keyfile
+            self._certfile = certfile
+            self._ca_certs = ca_certs
+            self._cert_reqs = cert_reqs
+            super().__init__(*args, **kwargs)
+
+        def get_request(self):
+            client, addr = super().get_request()
+            client_ssl = ssl.wrap_socket(client,
+                                         keyfile = self._keyfile,
+                                         certfile = self._certfile,
+                                         ca_certs = self._ca_certs,
+                                         cert_reqs = self._cert_reqs,
+                                         server_side = True)
+            return client_ssl, addr
+
+为了使用这个mixin类，你可以将它跟其他服务器类混合。例如，下面是定义一个基于SSL的XML-RPC服务器例子：
+
+.. code-block:: python
+
+    # XML-RPC server with SSL
+
+    from xmlrpc.server import SimpleXMLRPCServer
+
+    class SSLSimpleXMLRPCServer(SSLMixin, SimpleXMLRPCServer):
+        pass
+
+    Here's the XML-RPC server from Recipe 11.6 modified only slightly to use SSL:
+
+    import ssl
+    from xmlrpc.server import SimpleXMLRPCServer
+    from sslmixin import SSLMixin
+
+    class SSLSimpleXMLRPCServer(SSLMixin, SimpleXMLRPCServer):
+        pass
+
+    class KeyValueServer:
+        _rpc_methods_ = ['get', 'set', 'delete', 'exists', 'keys']
+        def __init__(self, *args, **kwargs):
+            self._data = {}
+            self._serv = SSLSimpleXMLRPCServer(*args, allow_none=True, **kwargs)
+            for name in self._rpc_methods_:
+                self._serv.register_function(getattr(self, name))
+
+        def get(self, name):
+            return self._data[name]
+
+        def set(self, name, value):
+            self._data[name] = value
+
+        def delete(self, name):
+            del self._data[name]
+
+        def exists(self, name):
+            return name in self._data
+
+        def keys(self):
+            return list(self._data)
+
+        def serve_forever(self):
+            self._serv.serve_forever()
+
+    if __name__ == '__main__':
+        KEYFILE='server_key.pem'    # Private key of the server
+        CERTFILE='server_cert.pem'  # Server certificate
+        kvserv = KeyValueServer(('', 15000),
+                                keyfile=KEYFILE,
+                                certfile=CERTFILE)
+        kvserv.serve_forever()
+
+使用这个服务器时，你可以使用普通的 ``xmlrpc.client`` 模块来连接它。
+只需要在URL中指定 ``https:`` 即可，例如：
+
+.. code-block:: python
+
+    >>> from xmlrpc.client import ServerProxy
+    >>> s = ServerProxy('https://localhost:15000', allow_none=True)
+    >>> s.set('foo','bar')
+    >>> s.set('spam', [1, 2, 3])
+    >>> s.keys()
+    ['spam', 'foo']
+    >>> s.get('foo')
+    'bar'
+    >>> s.get('spam')
+    [1, 2, 3]
+    >>> s.delete('spam')
+    >>> s.exists('spam')
+    False
+    >>>
+
+对于SSL客户端来讲一个比较复杂的问题是如何确认服务器证书或为服务器提供客户端认证（比如客户端证书）。
+不幸的是，暂时还没有一个标准方法来解决这个问题，需要自己去研究。
+不过，下面给出一个例子，用来建立一个安全的XML-RPC连接来确认服务器证书：
+
+.. code-block:: python
+
+    from xmlrpc.client import SafeTransport, ServerProxy
+    import ssl
+
+    class VerifyCertSafeTransport(SafeTransport):
+        def __init__(self, cafile, certfile=None, keyfile=None):
+            SafeTransport.__init__(self)
+            self._ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+            self._ssl_context.load_verify_locations(cafile)
+            if certfile:
+                self._ssl_context.load_cert_chain(certfile, keyfile)
+            self._ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+        def make_connection(self, host):
+            # Items in the passed dictionary are passed as keyword
+            # arguments to the http.client.HTTPSConnection() constructor.
+            # The context argument allows an ssl.SSLContext instance to
+            # be passed with information about the SSL configuration
+            s = super().make_connection((host, {'context': self._ssl_context}))
+
+            return s
+
+    # Create the client proxy
+    s = ServerProxy('https://localhost:15000',
+                    transport=VerifyCertSafeTransport('server_cert.pem'),
+                    allow_none=True)
+
+服务器将证书发送给客户端，客户端来确认它的合法性。这种确认可以是相互的。
+如果服务器想要确认客户端，可以将服务器启动代码修改如下：
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        KEYFILE='server_key.pem'   # Private key of the server
+        CERTFILE='server_cert.pem' # Server certificate
+        CA_CERTS='client_cert.pem' # Certificates of accepted clients
+
+        kvserv = KeyValueServer(('', 15000),
+                                keyfile=KEYFILE,
+                                certfile=CERTFILE,
+                                ca_certs=CA_CERTS,
+                                cert_reqs=ssl.CERT_REQUIRED,
+                                )
+        kvserv.serve_forever()
+
+为了让XML-RPC客户端发送证书，修改 ``ServerProxy`` 的初始化代码如下：
+
+.. code-block:: python
+
+    # Create the client proxy
+    s = ServerProxy('https://localhost:15000',
+                    transport=VerifyCertSafeTransport('server_cert.pem',
+                                                      'client_cert.pem',
+                                                      'client_key.pem'),
+                    allow_none=True)
+
+----------
+讨论
+----------
+试着去运行本节的代码能测试你的系统配置能力和理解SSL。
+可能最大的挑战是如何一步步的获取初始配置key、证书和其他所需依赖。
+
+我解释下到底需要啥，每一个SSL连接终端一般都会有一个私钥和一个签名证书文件。
+这个证书包含了公钥并在每一次连接的时候都会发送给对方。
+对于公共服务器，它们的证书通常是被权威证书机构比如Verisign、Equifax或其他类似机构（需要付费的）签名过的。
+为了确认服务器签名，客户端回保存一份包含了信任授权机构的证书列表文件。
+例如，web浏览器保存了主要的认证机构的证书，并使用它来为每一个HTTPS连接确认证书的合法性。
+对本小节示例而言，只是为了测试，我们可以创建自签名的证书，下面是主要步骤：
+
+
+    bash % openssl req -new -x509 -days 365 -nodes -out server_cert.pem \
+               -keyout server_key.pem
+    Generating a 1024 bit RSA private key
+    ..........................................++++++
+    ...++++++
+
+    writing new private key to 'server_key.pem'
+
+     -----
+    You are about to be asked to enter information that will be incorporated
+    into your certificate request.
+    What you are about to enter is what is called a Distinguished Name or a DN.
+    There are quite a few fields but you can leave some blank
+    For some fields there will be a default value,
+    If you enter '.', the field will be left blank.
+     -----
+    Country Name (2 letter code) [AU]:US
+    State or Province Name (full name) [Some-State]:Illinois
+    Locality Name (eg, city) []:Chicago
+    Organization Name (eg, company) [Internet Widgits Pty Ltd]:Dabeaz, LLC
+    Organizational Unit Name (eg, section) []:
+    Common Name (eg, YOUR name) []:localhost
+    Email Address []:
+    bash %
+
+在创建证书的时候，各个值的设定可以是任意的，但是”Common Name“的值通常要包含服务器的DNS主机名。
+如果你只是在本机测试，那么就使用”localhost“，否则使用服务器的域名。
+
+    -----BEGIN RSA PRIVATE KEY-----
+    MIICXQIBAAKBgQCZrCNLoEyAKF+f9UNcFaz5Osa6jf7qkbUl8si5xQrY3ZYC7juu
+    nL1dZLn/VbEFIITaUOgvBtPv1qUWTJGwga62VSG1oFE0ODIx3g2Nh4sRf+rySsx2
+    L4442nx0z4O5vJQ7k6eRNHAZUUnCL50+YvjyLyt7ryLSjSuKhCcJsbZgPwIDAQAB
+    AoGAB5evrr7eyL4160tM5rHTeATlaLY3UBOe5Z8XN8Z6gLiB/ucSX9AysviVD/6F
+    3oD6z2aL8jbeJc1vHqjt0dC2dwwm32vVl8mRdyoAsQpWmiqXrkvP4Bsl04VpBeHw
+    Qt8xNSW9SFhceL3LEvw9M8i9MV39viih1ILyH8OuHdvJyFECQQDLEjl2d2ppxND9
+    PoLqVFAirDfX2JnLTdWbc+M11a9Jdn3hKF8TcxfEnFVs5Gav1MusicY5KB0ylYPb
+    YbTvqKc7AkEAwbnRBO2VYEZsJZp2X0IZqP9ovWokkpYx+PE4+c6MySDgaMcigL7v
+    WDIHJG1CHudD09GbqENasDzyb2HAIW4CzQJBAKDdkv+xoW6gJx42Auc2WzTcUHCA
+    eXR/+BLpPrhKykzbvOQ8YvS5W764SUO1u1LWs3G+wnRMvrRvlMCZKgggBjkCQQCG
+    Jewto2+a+WkOKQXrNNScCDE5aPTmZQc5waCYq4UmCZQcOjkUOiN3ST1U5iuxRqfb
+    V/yX6fw0qh+fLWtkOs/JAkA+okMSxZwqRtfgOFGBfwQ8/iKrnizeanTQ3L6scFXI
+    CHZXdJ3XQ6qUmNxNn7iJ7S/LDawo1QfWkCfD9FYoxBlg
+    -----END RSA PRIVATE KEY-----
+
+服务器证书文件server_cert.pem内容类似下面这样：
+
+    -----BEGIN CERTIFICATE-----
+    MIIC+DCCAmGgAwIBAgIJAPMd+vi45js3MA0GCSqGSIb3DQEBBQUAMFwxCzAJBgNV
+    BAYTAlVTMREwDwYDVQQIEwhJbGxpbm9pczEQMA4GA1UEBxMHQ2hpY2FnbzEUMBIG
+    A1UEChMLRGFiZWF6LCBMTEMxEjAQBgNVBAMTCWxvY2FsaG9zdDAeFw0xMzAxMTEx
+    ODQyMjdaFw0xNDAxMTExODQyMjdaMFwxCzAJBgNVBAYTAlVTMREwDwYDVQQIEwhJ
+    bGxpbm9pczEQMA4GA1UEBxMHQ2hpY2FnbzEUMBIGA1UEChMLRGFiZWF6LCBMTEMx
+    EjAQBgNVBAMTCWxvY2FsaG9zdDCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA
+    mawjS6BMgChfn/VDXBWs+TrGuo3+6pG1JfLIucUK2N2WAu47rpy9XWS5/1WxBSCE
+    2lDoLwbT79alFkyRsIGutlUhtaBRNDgyMd4NjYeLEX/q8krMdi+OONp8dM+DubyU
+
+    O5OnkTRwGVFJwi+dPmL48i8re68i0o0rioQnCbG2YD8CAwEAAaOBwTCBvjAdBgNV
+    HQ4EFgQUrtoLHHgXiDZTr26NMmgKJLJLFtIwgY4GA1UdIwSBhjCBg4AUrtoLHHgX
+    iDZTr26NMmgKJLJLFtKhYKReMFwxCzAJBgNVBAYTAlVTMREwDwYDVQQIEwhJbGxp
+    bm9pczEQMA4GA1UEBxMHQ2hpY2FnbzEUMBIGA1UEChMLRGFiZWF6LCBMTEMxEjAQ
+    BgNVBAMTCWxvY2FsaG9zdIIJAPMd+vi45js3MAwGA1UdEwQFMAMBAf8wDQYJKoZI
+    hvcNAQEFBQADgYEAFci+dqvMG4xF8UTnbGVvZJPIzJDRee6Nbt6AHQo9pOdAIMAu
+    WsGCplSOaDNdKKzl+b2UT2Zp3AIW4Qd51bouSNnR4M/gnr9ZD1ZctFd3jS+C5XRp
+    D3vvcW5lAnCCC80P6rXy7d7hTeFu5EYKtRGXNvVNd/06NALGDflrrOwxF3Y=
+    -----END CERTIFICATE-----
+
+在服务器端代码中，私钥和证书文件会被传给SSL相关的包装函数。证书来自于客户端，
+私钥应该在保存在服务器中，并加以安全保护。
+
+在客户端代码中，需要保存一个合法证书授权文件来确认服务器证书。
+如果你没有这个文件，你可以在客户端复制一份服务器的证书并使用它来确认。
+连接建立后，服务器会提供它的证书，然后你就能使用已经保存的证书来确认它是否正确。
+
+服务器也能选择是否要确认客户端的身份。如果要这样做的话，客户端需要有自己的私钥和认证文件。
+服务器也需要保存一个被信任证书授权文件来确认客户端证书。
+
+如果你要在真实环境中为你的网络服务加上SSL的支持，这小节只是一个入门介绍而已。
+你还应该参考其他的文档，做好花费不少时间来测试它正常工作的准备。反正，就是得慢慢折腾吧~ ^_^
+
+==============================
+11.11 进程间传递Socket文件描述符
+==============================
+
+----------
+问题
+----------
+你有多个Python解释器进程在同时运行，你想将某个打开的文件描述符从一个解释器传递给另外一个。
+比如，假设有个服务器进程相应连接请求，但是实际的相应逻辑是在另一个解释器中执行的。
+
+----------
+解决方案
+----------
+为了在多个进程中传递文件描述符，你首先需要将它们连接到一起。在Unix机器上，你可能需要使用Unix域套接字，
+而在windows上面你需要使用命名管道。不过你无需真的需要去操作这些底层，
+通常使用 ``multiprocessing`` 模块来创建这样的连接会更容易一些。
+
+一旦一个连接被创建，你可以使用 ``multiprocessing.reduction`` 中的
+``send_handle()`` 和 ``recv_handle()`` 函数在不同的处理器直接传递文件描述符。
+下面的例子演示了最基本的用法：
+
+.. code-block:: python
+
+    import multiprocessing
+    from multiprocessing.reduction import recv_handle, send_handle
+    import socket
+
+    def worker(in_p, out_p):
+        out_p.close()
+        while True:
+            fd = recv_handle(in_p)
+            print('CHILD: GOT FD', fd)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=fd) as s:
+                while True:
+                    msg = s.recv(1024)
+                    if not msg:
+                        break
+                    print('CHILD: RECV {!r}'.format(msg))
+                    s.send(msg)
+
+    def server(address, in_p, out_p, worker_pid):
+        in_p.close()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        s.bind(address)
+        s.listen(1)
+        while True:
+            client, addr = s.accept()
+            print('SERVER: Got connection from', addr)
+            send_handle(out_p, client.fileno(), worker_pid)
+            client.close()
+
+    if __name__ == '__main__':
+        c1, c2 = multiprocessing.Pipe()
+        worker_p = multiprocessing.Process(target=worker, args=(c1,c2))
+        worker_p.start()
+
+        server_p = multiprocessing.Process(target=server,
+                      args=(('', 15000), c1, c2, worker_p.pid))
+        server_p.start()
+
+        c1.close()
+        c2.close()
+
+在这个例子中，两个进程被创建并通过一个 ``multiprocessing`` 管道连接起来。
+服务器进程打开一个socket并等待客户端连接请求。
+工作进程仅仅使用 ``recv_handle()`` 在管道上面等待接收一个文件描述符。
+当服务器接收到一个连接，它将产生的socket文件描述符通过 ``send_handle()`` 传递给工作进程。
+工作进程接收到socket后向客户端回应数据，然后此次连接关闭。
+
+如果你使用Telnet或类似工具连接到服务器，下面是一个演示例子：
+
+    bash % python3 passfd.py
+    SERVER: Got connection from ('127.0.0.1', 55543)
+    CHILD: GOT FD 7
+    CHILD: RECV b'Hello\r\n'
+    CHILD: RECV b'World\r\n'
+
+此例最重要的部分是服务器接收到的客户端socket实际上被另外一个不同的进程处理。
+服务器仅仅只是将其转手并关闭此连接，然后等待下一个连接。
+
+----------
+讨论
+----------
+对于大部分程序员来讲在不同进程之间传递文件描述符好像没什么必要。
+但是，有时候它是构建一个可扩展系统的很有用的工具。例如，在一个多核机器上面，
+你可以有多个Python解释器实例，将文件描述符传递给其它解释器来实现负载均衡。
+
+``send_handle()`` 和 ``recv_handle()`` 函数只能够用于 ``multiprocessing`` 连接。
+使用它们来代替管道的使用（参考11.7节），只要你使用的是Unix域套接字或Windows管道。
+例如，你可以让服务器和工作者各自以单独的程序来启动。下面是服务器的实现例子：
+
+.. code-block:: python
+
+    # servermp.py
+    from multiprocessing.connection import Listener
+    from multiprocessing.reduction import send_handle
+    import socket
+
+    def server(work_address, port):
+        # Wait for the worker to connect
+        work_serv = Listener(work_address, authkey=b'peekaboo')
+        worker = work_serv.accept()
+        worker_pid = worker.recv()
+
+        # Now run a TCP/IP server and send clients to worker
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        s.bind(('', port))
+        s.listen(1)
+        while True:
+            client, addr = s.accept()
+            print('SERVER: Got connection from', addr)
+
+            send_handle(worker, client.fileno(), worker_pid)
+            client.close()
+
+    if __name__ == '__main__':
+        import sys
+        if len(sys.argv) != 3:
+            print('Usage: server.py server_address port', file=sys.stderr)
+            raise SystemExit(1)
+
+        server(sys.argv[1], int(sys.argv[2]))
+
+运行这个服务器，只需要执行 `python3 servermp.py /tmp/servconn 15000` ，下面是相应的工作者代码：
+
+.. code-block:: python
+
+    # workermp.py
+
+    from multiprocessing.connection import Client
+    from multiprocessing.reduction import recv_handle
+    import os
+    from socket import socket, AF_INET, SOCK_STREAM
+
+    def worker(server_address):
+        serv = Client(server_address, authkey=b'peekaboo')
+        serv.send(os.getpid())
+        while True:
+            fd = recv_handle(serv)
+            print('WORKER: GOT FD', fd)
+            with socket(AF_INET, SOCK_STREAM, fileno=fd) as client:
+                while True:
+                    msg = client.recv(1024)
+                    if not msg:
+                        break
+                    print('WORKER: RECV {!r}'.format(msg))
+                    client.send(msg)
+
+    if __name__ == '__main__':
+        import sys
+        if len(sys.argv) != 2:
+            print('Usage: worker.py server_address', file=sys.stderr)
+            raise SystemExit(1)
+
+        worker(sys.argv[1])
+
+要运行工作者，执行执行命令 `python3 workermp.py /tmp/servconn` .
+效果跟使用Pipe()例子是完全一样的。
+文件描述符的传递会涉及到UNIX域套接字的创建和套接字的 ``sendmsg()`` 方法。
+不过这种技术并不常见，下面是使用套接字来传递描述符的另外一种实现：
+
+.. code-block:: python
+
+    # server.py
+    import socket
+
+    import struct
+
+    def send_fd(sock, fd):
+        '''
+        Send a single file descriptor.
+        '''
+        sock.sendmsg([b'x'],
+                     [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack('i', fd))])
+        ack = sock.recv(2)
+        assert ack == b'OK'
+
+    def server(work_address, port):
+        # Wait for the worker to connect
+        work_serv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        work_serv.bind(work_address)
+        work_serv.listen(1)
+        worker, addr = work_serv.accept()
+
+        # Now run a TCP/IP server and send clients to worker
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        s.bind(('',port))
+        s.listen(1)
+        while True:
+            client, addr = s.accept()
+            print('SERVER: Got connection from', addr)
+            send_fd(worker, client.fileno())
+            client.close()
+
+    if __name__ == '__main__':
+        import sys
+        if len(sys.argv) != 3:
+            print('Usage: server.py server_address port', file=sys.stderr)
+            raise SystemExit(1)
+
+        server(sys.argv[1], int(sys.argv[2]))
+
+下面是使用套接字的工作者实现：
+
+.. code-block:: python
+
+    # worker.py
+    import socket
+    import struct
+
+    def recv_fd(sock):
+        '''
+        Receive a single file descriptor
+        '''
+        msg, ancdata, flags, addr = sock.recvmsg(1,
+                                         socket.CMSG_LEN(struct.calcsize('i')))
+
+        cmsg_level, cmsg_type, cmsg_data = ancdata[0]
+        assert cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS
+        sock.sendall(b'OK')
+
+        return struct.unpack('i', cmsg_data)[0]
+
+    def worker(server_address):
+        serv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        serv.connect(server_address)
+        while True:
+            fd = recv_fd(serv)
+            print('WORKER: GOT FD', fd)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=fd) as client:
+                while True:
+                    msg = client.recv(1024)
+                    if not msg:
+                        break
+                    print('WORKER: RECV {!r}'.format(msg))
+                    client.send(msg)
+
+    if __name__ == '__main__':
+        import sys
+        if len(sys.argv) != 2:
+            print('Usage: worker.py server_address', file=sys.stderr)
+            raise SystemExit(1)
+
+        worker(sys.argv[1])
+
+如果你想在你的程序中传递文件描述符，建议你参阅其他一些更加高级的文档，
+比如 ``Unix Network Programming by W. Richard Stevens  (Prentice  Hall,  1990)`` .
+在Windows上传递文件描述符跟Unix是不一样的，建议你研究下 ``multiprocessing.reduction`` 中的源代码看看其工作原理。
+
+==============================
+11.12 理解事件驱动的IO
+==============================
+
+----------
+问题
+----------
+你应该已经听过基于事件驱动或异步I/O的包，但是你还不能完全理解它的底层到底是怎样工作的，
+或者是如果使用它的话会对你的程序产生什么影响。
+
+----------
+解决方案
+----------
+事件驱动I/O本质上来讲就是将基本I/O操作（比如读和写）转化为你程序需要处理的事件。
+例如，当数据在某个socket上被接受后，它会转换成一个 ``receive`` 事件，然后被你定义的回调方法或函数来处理。
+作为一个可能的起始点，一个事件驱动的框架可能会以一个实现了一系列基本事件处理器方法的基类开始：
+
+.. code-block:: python
+
+    class EventHandler:
+        def fileno(self):
+            'Return the associated file descriptor'
+            raise NotImplemented('must implement')
+
+        def wants_to_receive(self):
+            'Return True if receiving is allowed'
+            return False
+
+        def handle_receive(self):
+            'Perform the receive operation'
+            pass
+
+        def wants_to_send(self):
+            'Return True if sending is requested'
+            return False
+
+        def handle_send(self):
+            'Send outgoing data'
+            pass
+
+这个类的实例作为插件被放入类似下面这样的事件循环中：
